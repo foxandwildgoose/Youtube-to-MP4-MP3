@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.output/
+.vinxi/
+backend/app/static/
+backend/.pytest_cache/
+**/__pycache__/
+*.pyc
+.venv/
+.env
+data/
+screenshots/
+*.log
+.DS_Store

@@ -1,0 +1,95 @@
+@import "tailwindcss";
+@import "@fontsource/noto-sans-kr/400.css";
+@import "@fontsource/noto-sans-kr/500.css";
+@import "@fontsource/noto-sans-kr/600.css";
+@import "@fontsource/noto-sans-kr/700.css";
+
+@theme inline {
+  --font-sans: "Noto Sans KR", "Liberation Sans", "WenQuanYi Zen Hei", sans-serif;
+  --color-bg: var(--c-bg);
+  --color-surface: var(--c-surface);
+  --color-fg: var(--c-fg);
+  --color-muted: var(--c-muted);
+  --color-primary: var(--c-primary);
+  --color-primary-fg: var(--c-primary-fg);
+  --color-border: var(--c-border);
+  --color-danger: var(--c-danger);
+  --color-ok: var(--c-ok);
+  --color-warn: var(--c-warn);
+  --radius-md: 0.85rem;
+}
+
+:root {
+  --c-bg: #f3efe6;
+  --c-surface: #fffdf8;
+  --c-fg: #1c1915;
+  --c-muted: #5e564c;
+  --c-primary: #9a3412;
+  --c-primary-fg: #fff7ed;
+  --c-border: #e4d9c8;
+  --c-danger: #9f1239;
+  --c-ok: #3f6212;
+  --c-warn: #92400e;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --c-bg: #141210;
+  --c-surface: #1f1b17;
+  --c-fg: #f6f1e8;
+  --c-muted: #c4b8a8;
+  --c-primary: #f0b089;
+  --c-primary-fg: #2a130c;
+  --c-border: #3a332c;
+  --c-danger: #fda4af;
+  --c-ok: #d9f99d;
+  --c-warn: #fdba74;
+  color-scheme: dark;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+  }
+  body {
+    background: var(--c-bg);
+    color: var(--c-fg);
+    min-height: 100vh;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  :focus-visible {
+    outline: 2px solid var(--c-primary);
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+}
+
+@utility indeterminate {
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--c-primary) 70%, transparent),
+    transparent
+  );
+  background-size: 40% 100%;
+  animation: slide 1.2s ease-in-out infinite;
+}
+
+@keyframes slide {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}

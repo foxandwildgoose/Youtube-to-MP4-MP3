@@ -1,0 +1,102 @@
+# Loopback-only personal deployment. Do not publish 0.0.0.0.
+# Optional Windows folder, instead of the named volume:
+#   volumes:
+#     - type: bind
+#       source: C:\Seorap\library
+#       target: /data
+# The SQLite files live under /data/state. Do not put that path on SMB or NFS.
+
+name: seorap
+
+services:
+  volume-init:
+    build: .
+    image: seorap:local
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["sh", "-c", "mkdir -p /data/state /data/tmp /data/files /data/logs && chown -R 10001:10001 /data"]
+    volumes:
+      - seorap-data:/data
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  app:
+    image: seorap:local
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    user: "10001:10001"
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - seorap-data:/data
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 40s
+    mem_limit: 1536m
+    cpus: "1.50"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    image: seorap:local
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    user: "10001:10001"
+    env_file:
+      - .env
+    command: ["python", "-m", "app.worker"]
+    volumes:
+      - seorap-data:/data
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 40s
+    mem_limit: 2048m
+    cpus: "1.50"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sqlite3,datetime; c=sqlite3.connect('/data/state/app.db'); r=c.execute('select beat_at from worker_heartbeat where id=1').fetchone(); assert r and (datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(r[0])).total_seconds()<30",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+volumes:
+  seorap-data:

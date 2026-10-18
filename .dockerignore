@@ -1,0 +1,16 @@
+.git
+node_modules
+frontend/node_modules
+dist
+.output
+data
+screenshots
+**/__pycache__
+**/.pytest_cache
+*.pyc
+.env
+backend/tests
+backend/app/static
+*.md
+!README.md
+!docs/ARCHITECTURE.md

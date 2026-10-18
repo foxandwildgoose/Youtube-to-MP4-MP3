@@ -75,8 +75,16 @@ export type Job = {
 };
 
 export type Session =
-  | { authenticated: false; bootstrapped: boolean }
-  | { authenticated: true; bootstrapped: true; csrf_token: string; expires_at: string; language: "ko" | "en"; theme: string };
+  | { authenticated: false; bootstrapped: boolean; password_required?: boolean }
+  | {
+      authenticated: true;
+      bootstrapped: true;
+      csrf_token: string;
+      expires_at: string;
+      language: "ko" | "en";
+      theme: string;
+      password_required?: boolean;
+    };
 
 export type PlaylistInspection = {
   playlist_id: string;

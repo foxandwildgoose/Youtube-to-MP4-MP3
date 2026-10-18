@@ -177,8 +177,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise AppError("CSRF_FAILED", 403)
         token = request.cookies.get(settings.cookie_name)
         row = session_from_token(conn, token)
+        if row is None and not settings.require_password:
+            ensure_preferences(conn)
+            _sid, token, _csrf = create_session(conn, settings)
+            response = JSONResponse(session_payload(conn, settings, token))
+            response.set_cookie(settings.cookie_name, token, **cookie_kwargs(settings))
+            return response
         if row is None:
-            return {"authenticated": False, "bootstrapped": operator_exists(conn)}
+            return {"authenticated": False, "bootstrapped": operator_exists(conn), "password_required": True}
         touch_session(conn, row["id"])
         return session_payload(conn, settings, token)
 
@@ -427,6 +433,7 @@ def session_payload(conn, settings: Settings, token: str | None) -> dict[str, An
         "expires_at": row["expires_at"],
         "language": prefs["language"] if prefs else "ko",
         "theme": prefs["theme"] if prefs else "system",
+        "password_required": settings.require_password,
     }
 
 

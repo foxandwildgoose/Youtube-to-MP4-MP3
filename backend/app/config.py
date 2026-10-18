@@ -42,6 +42,7 @@ class Settings:
     allow_fixture_urls: bool
     fixture_catalog: Path | None
     local_http: bool
+    require_password: bool
     allow_http_bootstrap: bool
     allowed_hosts: tuple[str, ...]
     enable_playlists: bool
@@ -109,6 +110,7 @@ def load_settings() -> Settings:
         allow_fixture_urls=_bool("ALLOW_FIXTURE_URLS", False),
         fixture_catalog=Path(catalog).resolve() if catalog else None,
         local_http=_bool("LOCAL_HTTP", True),
+        require_password=_bool("REQUIRE_PASSWORD", True),
         allow_http_bootstrap=_bool("ALLOW_HTTP_BOOTSTRAP", False),
         allowed_hosts=hosts,
         enable_playlists=_bool("ENABLE_PLAYLISTS", False),

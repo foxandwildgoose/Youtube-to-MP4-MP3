@@ -235,7 +235,7 @@ export function DownloaderApp() {
           <button type="button" className="border-border bg-surface size-11 rounded-md border" aria-label={t.theme} onClick={() => cycleTheme()}>
             {theme === "dark" ? <Moon className="mx-auto size-5" /> : <Sun className="mx-auto size-5" />}
           </button>
-          {gate === "ready" ? (
+          {gate === "ready" && session?.authenticated && session.password_required !== false ? (
             <button type="button" className="border-border bg-surface hidden h-11 rounded-md border px-3 text-sm sm:inline" onClick={() => void logout()}>
               {t.logout}
             </button>

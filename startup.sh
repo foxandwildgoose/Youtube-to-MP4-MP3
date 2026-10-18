@@ -6,6 +6,7 @@ cd /workspace
 
 export DATA_DIR="${DATA_DIR:-/workspace/data}"
 export LOCAL_HTTP=1
+export REQUIRE_PASSWORD=0
 export ALLOW_HTTP_BOOTSTRAP=1
 export ALLOWED_HOSTS="${ALLOWED_HOSTS:-127.0.0.1,localhost}"
 export FFMPEG_PATH="${FFMPEG_PATH:-/usr/local/bin/ffmpeg}"

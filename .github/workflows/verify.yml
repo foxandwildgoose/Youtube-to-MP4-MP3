@@ -42,6 +42,21 @@ jobs:
       - run: npm run check:vercel
       - name: Clean Compose configuration
         run: cp .env.example .env && docker compose config --quiet
+      - name: Personal passwordless deployment boundary
+        run: |
+          docker compose config --format json > "$RUNNER_TEMP/seorap-personal.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          services = json.loads((Path(os.environ['RUNNER_TEMP']) / 'seorap-personal.json').read_text())['services']
+          for name in ('app', 'worker'):
+              env = services[name]['environment']
+              assert env['REQUIRE_PASSWORD'] == '0' and env['ALLOW_HTTP_BOOTSTRAP'] == '0'
+              assert env['LOCAL_HTTP'] == '1' and env['ALLOWED_HOSTS'] == '127.0.0.1,localhost'
+          assert not services['worker'].get('ports')
+          assert services['app']['ports'][0]['host_ip'] == '127.0.0.1'
+          assert int(services['app']['ports'][0]['published']) == 8000
+          PY
       - name: Authenticated HTTPS deployment boundary
         env:
           SEORAP_PUBLIC_HOST: downloads.example.com
@@ -82,7 +97,7 @@ jobs:
         run: docker build --platform linux/amd64 --target test -t seorap:test .
       - name: Fixture regressions as nonroot with read-only image
         run: docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,size=34359738368,mode=1777 --init seorap:test
-      - name: Start protected profile and check API plus worker health
+      - name: Start passwordless personal profile and check API plus worker health
         run: cp .env.example .env && docker compose up -d --wait --wait-timeout 90
       - name: Prepare an isolated synthetic fixture stack
         env:
@@ -92,7 +107,7 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.fixture.yml up -d --wait --wait-timeout 90
           python scripts/bootstrap-fixture.py --password-file "$RUNNER_TEMP/seorap-test-password"
       - name: Prepare scoped browser output and cache directories
-        run: sudo install -d -o "$(id -u)" -g "$(id -g)" /workspace/screenshots /workspace/.cache/npm /workspace/.cache/agent-browser
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" /workspace/screenshots /workspace/.cache /workspace/.cache/npm /workspace/.cache/agent-browser
       - name: Authenticated fixture browser journeys
         env:
           SEORAP_BROWSER_URL: http://127.0.0.1:18000
@@ -101,10 +116,20 @@ jobs:
           SEORAP_COMPOSE_PROJECT: seorap-fixture
           SEORAP_COMPOSE_FILES: docker-compose.yml,docker-compose.fixture.yml
         run: npm run test:browser
+      - name: Start isolated passwordless fixture
+        env:
+          SEORAP_FIXTURE_DIR: ${{ runner.temp }}/seorap-fixtures
+        run: |
+          docker tag seorap:local seorap:passwordless-fixture
+          docker compose -p seorap-passwordless-fixture -f docker-compose.yml -f docker-compose.fixture.yml -f docker-compose.override.yml -f docker-compose.passwordless-fixture.yml up -d --no-build --wait --wait-timeout 90
+      - name: Passwordless entry, session recovery and actual file downloads
+        env:
+          SEORAP_FIXTURE_DIR: ${{ runner.temp }}/seorap-fixtures
+        run: node scripts/test-passwordless-browser.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: authenticated-fixture-browser
+          name: downloader-fixture-browser
           path: /workspace/screenshots/
           if-no-files-found: ignore
       - name: Preserve diagnostics
@@ -115,6 +140,7 @@ jobs:
         env:
           SEORAP_FIXTURE_DIR: ${{ runner.temp }}/seorap-fixtures
         run: |
+          docker compose -p seorap-passwordless-fixture -f docker-compose.yml -f docker-compose.fixture.yml -f docker-compose.override.yml -f docker-compose.passwordless-fixture.yml down
           docker compose -f docker-compose.yml -f docker-compose.fixture.yml down
           docker compose down
   powershell-setup:

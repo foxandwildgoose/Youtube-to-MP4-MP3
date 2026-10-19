@@ -1,5 +1,5 @@
 #!/bin/sh
-# Grok preview/revive profile. Authenticated local operation uses Docker Compose.
+# Grok preview/revive profile. Personal operation opens without a password.
 set -eu
 seorap_root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 cd "$seorap_root"

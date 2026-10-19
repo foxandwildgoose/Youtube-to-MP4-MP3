@@ -9,45 +9,53 @@ React·FastAPI·별도 작업자·SQLite·yt-dlp·FFmpeg 구조를 유지했습�
 [YouTube Studio/Takeout 안내](https://support.google.com/youtube/answer/56100?hl=ko)를
 참고하세요. [YouTube 약관](https://www.youtube.com/static?template=terms).
 
-## 지원 기본 실행: 인증된 로컬 Docker Compose
+## 지원 기본 실행: 비밀번호 없는 개인용 로컬 Docker Compose
 
 Docker Engine/Desktop와 Compose **2.24.4 이상**, Linux amd64 이미지를 사용합니다.
 ARM 머신은 명시적 amd64 에뮬레이션이 필요하며 네이티브 ARM 이미지는 지원하지 않습니다.
 앱과 작업자는 UID10001, 읽기 전용 루트, 전용 영구 볼륨을 사용하고
-`127.0.0.1:8000`에만 공개합니다. 별도 소유 호스트의 단일 운영자 HTTPS 구성은
+`127.0.0.1:8000`에만 공개합니다. 노트북에서 사용하는 기본 구성은 로그인이나
+비밀번호 설정 없이 바로 열립니다. 별도 소유 호스트의 단일 운영자 HTTPS 구성은
 [Vercel과 변환 서버 연결](docs/VERCEL_DEPLOYMENT.md)을 따릅니다.
 
 Linux/macOS:
 
 ```sh
 sh scripts/setup.sh
-docker compose exec app python -m app.cli bootstrap
 ```
 
 Windows PowerShell5.1 또는7:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
-docker compose exec app python -m app.cli bootstrap
 ```
 
 설치 스크립트는 없는 `.env`만 비밀값 없는 `.env.example`에서 만들며 기존 파일을
 덮어쓰지 않습니다. Docker CLI·Compose·daemon과 시작 준비를 따로 확인합니다.
-CLI에서 비밀번호를 설정한 뒤 **http://127.0.0.1:8000** 에 로그인하세요.
-초기 화면의 ‘다시 확인’으로 설정 완료를 확인할 수 있습니다. 기본 구성은
-브라우저 첫 비밀번호 설정을 허용하지 않습니다. 비밀번호/쿠키를 저장소에 넣지 마세요.
+설치가 끝나면 **http://127.0.0.1:8000** 을 열어 바로 사용하세요. 비밀번호 설정 명령은
+필요하지 않습니다. `docker-compose.override.yml`이 개인용 설정을 자동 적용하므로
+기존 `.env`에 `REQUIRE_PASSWORD=1`이 남아 있어도 파일을 수정하지 않고 로그인 없이
+열립니다. 이미 저장된 비밀번호 해시·작업 기록·파일은 삭제하지 않습니다.
 
 ```sh
 docker compose up -d --wait
 docker compose stop
 docker compose start
-docker compose exec app python -m app.cli reset-password
 docker compose logs --tail 100 app worker
 ```
 
 `unless-stopped`는 예상하지 못한 종료를 복구하고 명시적 중지는 존중합니다.
 healthcheck는 재시작 정책 자체가 아니며, 긴 미디어 작업 중에도 heartbeat가 유지됩니다.
 볼륨 삭제(`down -v`)는 비밀번호·기록·파일을 없애므로 업데이트에 사용하지 않습니다.
+
+이전에 실행한 컨테이너에는 최신 코드를 받은 뒤 `docker compose up -d --build --wait`로
+개인용 설정을 적용합니다. `docker compose start`는 기존 컨테이너를 켜기만 하므로
+설정 변경을 반영하지 않습니다. 이 모드는 같은 노트북에서만 사용합니다. 외부 공개
+HTTPS 프로필은 [별도 명령](docs/VERCEL_DEPLOYMENT.md)으로 선택하며 비밀번호 보호를
+유지합니다. 그 문서의 CLI 비밀번호 설정은 외부 HTTPS 보호 모드에만 해당합니다.
+
+비밀번호 없는 첫 접속·새로고침·세션 만료 복구와 실제 테스트 파일 전송의 실행 결과는
+[개인용 비밀번호 제거 검증](docs/VERIFICATION_PASSWORDLESS.md)에 기록했습니다.
 
 새 named volume은 필요한 네 디렉터리만 초기화합니다. 기존 볼륨 전체를 재귀 chown하지
 않습니다. 호스트 bind mount를 사용하려면 해당 **전용** 디렉터리와 `state/tmp/files/logs`를
@@ -148,7 +156,8 @@ npm run preview:stop
 ```
 
 8080 개발 UI, 루프백8000 API, 별도 작업자를 함께 실행합니다. `startup.sh`는 독립적으로
-부족한 프로세스만 복구하고 인증 설정을 끄지 않습니다. PWA 브랜딩·미리보기 브리지는
+부족한 프로세스만 복구합니다. 개인용 비밀번호 없는 모드와 명시적 보호 모드를 구분하며
+PWA 브랜딩·미리보기 브리지는
 유지합니다. `npm run build`의 frontend-only Nitro/Vercel 출력만으로 영구 처리 서비스가
 생기지는 않습니다. API 없이 보이는 화면은 동작하는 다운로더의 증거가 아닙니다.
 알려진 플랫폼 프록시를 추가해야 한다면 `SEORAP_PREVIEW_ALLOWED_HOSTS`에 실제

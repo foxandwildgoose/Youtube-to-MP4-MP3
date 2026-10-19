@@ -1,0 +1,17 @@
+# Personal notebook default, automatically loaded by ordinary `docker compose`.
+# Explicit environment entries override older .env values without editing that file.
+# Keep this mode local; the separate explicit HTTPS overlay requires a password.
+x-personal: &personal
+  REQUIRE_PASSWORD: "0"
+  ALLOWED_HOSTS: 127.0.0.1,localhost
+  LOCAL_HTTP: "1"
+  ALLOW_HTTP_BOOTSTRAP: "0"
+
+services:
+  app:
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    environment: *personal
+
+  worker:
+    environment: *personal

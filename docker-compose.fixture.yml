@@ -11,6 +11,7 @@ services:
       ALLOW_FIXTURE_URLS: "1"
       ALLOW_TEST_HOOKS: "1"
       FIXTURE_CATALOG: /fixtures/catalog.json
+      # Authenticated fixture stays independent from the personal passwordless default.
       REQUIRE_PASSWORD: "1"
       ALLOW_HTTP_BOOTSTRAP: "0"
       ENABLE_PLAYLISTS: "1"
@@ -29,6 +30,7 @@ services:
       ALLOW_FIXTURE_URLS: "1"
       ALLOW_TEST_HOOKS: "1"
       FIXTURE_CATALOG: /fixtures/catalog.json
+      # Authenticated fixture stays independent from the personal passwordless default.
       REQUIRE_PASSWORD: "1"
       ALLOW_HTTP_BOOTSTRAP: "0"
       ENABLE_PLAYLISTS: "1"

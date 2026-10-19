@@ -1,5 +1,5 @@
 #!/bin/sh
-# Linux/macOS setup for the authenticated loopback Docker profile.
+# Linux/macOS setup for the passwordless personal loopback Docker profile.
 set -eu
 cd "$(dirname "$0")/.."
 if ! command -v docker >/dev/null 2>&1; then
@@ -16,14 +16,15 @@ if [ ! -f .env ]; then
   (umask 077; cp .env.example .env)
   echo 'Created .env from .env.example; existing configurations are preserved.'
 fi
-# Explicit override for nested cloud Docker only; ordinary local setup has no CA mounts.
+# Explicit -f disables Compose's automatic override, so include the personal profile.
+# Only nested cloud Docker also needs the inherited proxy CA mounts.
 if [ -n "${CODEX_PROXY_CERT:-}" ]; then
   export BUILDX_CONFIG="${BUILDX_CONFIG:-$PWD/.cache/buildx}"
-  set -- -f docker-compose.yml -f docker-compose.cloud.yml
+  set -- -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.cloud.yml
 else
-  set -- -f docker-compose.yml
+  set -- -f docker-compose.yml -f docker-compose.override.yml
 fi
 docker compose "$@" config --quiet
 docker compose "$@" build
 docker compose "$@" up -d --wait --wait-timeout 90
-printf '%s\n' 'Ready: http://127.0.0.1:8000' 'Initialize the password interactively:' '  docker compose exec app python -m app.cli bootstrap'
+printf '%s\n' 'Ready: http://127.0.0.1:8000' 'Open this address in your browser. No login password is needed for personal local use.'

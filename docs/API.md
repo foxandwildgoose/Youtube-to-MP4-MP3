@@ -8,9 +8,11 @@ FastAPI의 `/api/v1/openapi.json`은 요청과 공개 응답 모델을 제공한
 
 - `GET /healthz`: 프로세스 생존만 확인한다. YouTube 연결이나 작업자 준비를 뜻하지 않는다.
 - `GET /api/v1/auth/session`: 인증, 비밀번호 설정 여부, `bootstrap_allowed`,
-  `bootstrap_method`를 반환한다. Compose 기본은 CLI 설정이며, 금지된 웹 설정을 제시하지 않는다.
+  `bootstrap_method`를 반환한다. 개인용 Compose 기본은 비밀번호를 요구하지 않으며
+  로그인 없이 사용한다. 외부 HTTPS 보호 모드는 CLI 설정이고, 금지된 웹 설정을 제시하지 않는다.
 - `POST /auth/bootstrap`, `/auth/login`, `/auth/logout`: Host/Origin·요청 표시 헤더를
-  검사한다. 로그인/변경 요청에는 같은 출처, 인증 후 변경에는 CSRF 토큰도 필요하다.
+  검사한다. 로그인/변경 요청에는 같은 출처, 보호 모드의 인증 후 변경에는 CSRF 토큰도 필요하다.
+  비밀번호 없는 개인용 모드도 Host/Origin·요청 표시 검사를 건너뛰지 않는다.
   비밀번호는 평문 저장하지 않는다. 초기 웹 설정은 명시적 허용+루프백에서만 가능하며
   초기 설정의 존재 검사와 저장은 같은 트랜잭션으로 수행한다.
 - `POST /analyses`: 제한 시간과 전역 분석 슬롯·공급자 cooldown을 적용한다.

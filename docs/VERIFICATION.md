@@ -9,6 +9,9 @@
 
 Vercel 공개 Host의403과 HTTPS 앱 연결에 대한 후속 수정·실행 결과는
 [VERIFICATION_VERCEL_FIX.md](VERIFICATION_VERCEL_FIX.md)에 별도로 기록한다.
+이후 사용자의 명시적 비밀번호 제거 요청을 반영한 개인용 기본값과 검증은
+[VERIFICATION_PASSWORDLESS.md](VERIFICATION_PASSWORDLESS.md)에 기록한다. 아래의 과거
+인증된 개인용 기본값 기록을 현재 비밀번호 요구사항으로 해석하지 않는다.
 
 ## 검사 환경
 

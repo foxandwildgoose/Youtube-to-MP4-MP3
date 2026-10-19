@@ -1,6 +1,8 @@
 # 서랍 구조와 운영 경계
 
-지원 기본값은 한 사람이 자신의 컴퓨터에서 쓰는 인증된 Docker Compose이다.
+지원 기본값은 한 사람이 자신의 컴퓨터에서 쓰는 비밀번호 없는 Docker Compose이다.
+일반 Compose 명령은 `docker-compose.override.yml`을 자동으로 읽어 루프백 주소와
+`REQUIRE_PASSWORD=0`을 적용한다. 기존 `.env`와 저장된 비밀번호 해시는 유지한다.
 React/TypeScript SPA는 같은 출처의 FastAPI가 제공한다. 별도 작업자가 SQLite WAL
 큐를 처리하고 yt-dlp/FFmpeg/ffprobe로 검증한 파일만 같은 로컬 볼륨에 게시한다.
 프레임워크·인증 스택·큐를 교체하지 않았다. Redis나 외부 유료 변환 API는 사용하지 않는다.
@@ -73,13 +75,16 @@ Grok PWA injector, 브랜딩, PreviewHostBridge와 사전 연결된 플랫폼 �
 API·SSE·파일 중계 및 출처 간 세션 쿠키 전달은 하지 않는다. 기존 문서는 기본 링크로
 앱을 다시 연다. Grok PWA 설치 경로는 이동시키지 않는다.
 
-scrypt 비밀번호, 해시된 HttpOnly 세션, CSRF, 동일 출처 Host/Origin을 유지한다.
+개인용 모드에서는 비밀번호 입력과 로그인 화면 없이 바로 사용하며 내부 세션은 자동
+발급한다. 두 모드 모두 해시된 HttpOnly 세션과 CSRF, 동일 출처 Host/Origin, 변경 요청
+표시를 검사한다. 외부 HTTPS 보호 모드에서는 scrypt 비밀번호 확인도 요구한다.
 잘못된 boolean 환경변수는 구성 오류로 거부해 오타가 인증 해제로 해석되지 않는다.
 운영 SPA HTML마다 style nonce를 발급하고 응답 CSP·meta·Radix의 get-nonce에 같은
 값을 연결한다. 대화상자 scroll-lock 스타일은 허용하되 script CSP를 완화하지 않는다.
 nonce가 든 HTML은 no-store다.
 기본 공개 포트는127.0.0.1이다. 운영자가 관리하는 HTTPS 호스트에서는
-`docker-compose.https.yml`로 Caddy만80/443에 공개하고 원래 데이터 볼륨을 유지한다.
+개인용 자동 override를 제외하는 명시적 `-f docker-compose.yml -f docker-compose.https.yml`
+명령으로 Caddy만80/443에 공개하고 비밀번호 보호와 원래 데이터 볼륨을 유지한다.
 이 구성의 로컬 TLS·인증·파일 전송 검증과 운영 DNS·ACME·egress 검증은 구분한다.
 자세한 전제는 [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md)에 있다.
 canonical YouTube URL과 썸네일 DNS 고정은 yt-dlp의

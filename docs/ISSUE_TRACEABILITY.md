@@ -13,7 +13,7 @@
 | **I01** | 템플릿·기존.env 보존·오류 분리 구현. PowerShell 실제 로컬 실행은 도구 부재로 skipped, CI5.1/7 추가 | `scripts/setup.sh, setup.ps1, .env.example` | setup-runtime.test.mjs; setup-powershell.test.mjs; V01 |
 | **I02** | one-shot CHOWN만 부여, 필요한 디렉터리만 초기화; 기존 전체 재귀 소유권 변경 없음 | `docker-compose.yml, scripts/init-volume.sh` | 실제 named volume fresh/reuse + bind mount; V02 |
 | **I03** | 보호 기본값·잘못된 boolean 설정 거부·명시적 허용 출처·헤더 번역 전 검사 | `config.py, startup.sh, preview-runtime.py, vite.config.ts, seorap-proxy.ts` | test_invalid_boolean_flags_fail_closed_without_silently_disabling_auth; seorap-preview-policy.test.ts; test_auth_origins_and_bootstrap_once; V03 |
-| **I04** | 개인 Compose/별도 Grok 구분; Vercel은 명시적 미설정 상태 또는 전체 HTTPS 앱 이동, 지속 처리 서비스 주장 없음 | `seorap-deployment.ts, seorap-proxy.ts, docker-compose.https.yml, docs/VERCEL_DEPLOYMENT.md` | 실제 middleware 회귀·생성 Vercel function8checks·HTTPS fixture; VERIFICATION_VERCEL_FIX.md |
+| **I04** | 개인 Compose/별도 Grok 구분; 최신 사용자 요청으로 개인용 비밀번호 입력 제거; Vercel은 미설정 상태 또는 전체 HTTPS 앱 이동 | `docker-compose.override.yml, session-requests.ts, seorap-deployment.ts, seorap-proxy.ts, docker-compose.https.yml` | passwordless backend/client/setup/browser 회귀; VERIFICATION_PASSWORDLESS.md; Vercel function8checks·HTTPS fixture |
 | **I05** | API/worker 독립 잠금·소유권·heartbeat 재시작 검사; 빌드 QA 종료 시 zombie 오판 수정 | `scripts/preview-runtime.py, scripts/preview.mjs` | scripts/test_preview_runtime.py; scripts/preview.test.mjs 실제 zombie 및 실제 restart/stop; V06 |
 | **I06** | B03과 같은 제어 루프 수정으로 해결; 중복 결함으로 세지 않음 | `worker.py, diagnostics.py` | test_busy_worker_heartbeat_and_housekeeping_beyond_stale_threshold; V06 |
 | **I07** | unless-stopped 구현; 호스트 Docker daemon 재시작 실험은 미실행 | `docker-compose.yml, worker.py` | 격리 Compose worker exit/intentional stop; V06 |

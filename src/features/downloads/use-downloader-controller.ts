@@ -14,6 +14,7 @@ import {
 import { activeJobs, mergeJobs, orderedJobs, removeJob, type JobEntities } from "./job-store";
 import { JobFeed, type FeedState } from "./job-feed";
 import { SessionScope } from "./session";
+import { SessionRequests } from "./session-requests";
 import {
   localPreferences,
   persistPreferences,
@@ -158,7 +159,7 @@ export function useDownloaderController() {
     setPendingIntent(intent);
     writeIntent(sessionStorageSafe(), intent);
   }, []);
-  const clearSession = useCallback((problem?: ApiError) => {
+  const clearSession = useCallback((problem?: ApiError, nextGate: Gate = "login") => {
     requestScope.current.reset();
     connectGeneration.current += 1;
     feed.current?.stop();
@@ -168,7 +169,7 @@ export function useDownloaderController() {
     preferenceWriter.current.invalidate();
     sessionRef.current = null;
     setSession(null);
-    setGate("login");
+    setGate(nextGate);
     setSettings(null);
     setReadiness(null);
     setEntities(new Map());
@@ -184,47 +185,38 @@ export function useDownloaderController() {
     setPlaylistBusy(false);
     setParentId(null);
     setDiagnosticsValue(null);
-    setErrors({ ...emptyErrors(), auth: problem || null });
+    setErrors({
+      ...emptyErrors(),
+      [nextGate === "offline" ? "connection" : "auth"]: problem || null,
+    });
     setPendingJobs({});
     jobLocks.current.clear();
     setLive("polling");
   }, []);
+  const sessionRequests = useMemo(
+    () =>
+      new SessionRequests({
+        scope: requestScope.current,
+        current: () => sessionRef.current,
+        refresh: (signal) => api.session({ signal }),
+        accept: (fresh) => {
+          sessionRef.current = fresh;
+          setSession(fresh);
+        },
+        expired: (problem, previous) =>
+          clearSession(problem, previous.password_required === false ? "offline" : "login"),
+        refreshError: (problem) => report("connection", problem),
+      }),
+    [clearSession, report],
+  );
   const withAuth = useCallback(
     async <T>(
       operation: (csrf: string, options: RequestOptions) => Promise<T>,
       signal?: AbortSignal,
     ): Promise<T> => {
-      const current = sessionRef.current;
-      if (!current?.authenticated)
-        throw new ApiError({ code: "UNAUTHORIZED", status: 401, action: "login" });
-      try {
-        return await requestScope.current.run(
-          (requestSignal) => operation(current.csrf_token, { signal: requestSignal }),
-          signal,
-        );
-      } catch (error) {
-        const problem = asApiError(error);
-        if (problem.status === 401 || problem.code === "UNAUTHORIZED") clearSession(problem);
-        else if (problem.code === "CSRF_FAILED") {
-          try {
-            const fresh = await requestScope.current.run(
-              (requestSignal) => api.session({ signal: requestSignal }),
-              signal,
-            );
-            if (!fresh.authenticated)
-              clearSession(new ApiError({ code: "UNAUTHORIZED", status: 401, action: "login" }));
-            else {
-              sessionRef.current = fresh;
-              setSession(fresh);
-            }
-          } catch (refreshError) {
-            if (asApiError(refreshError).code !== "ABORTED") report("connection", refreshError);
-          }
-        }
-        throw problem;
-      }
+      return sessionRequests.run(operation, signal);
     },
-    [clearSession, report],
+    [sessionRequests],
   );
   const retryConnection = useCallback(
     async (showBusy = true) => {
@@ -232,12 +224,25 @@ export function useDownloaderController() {
       if (showBusy) setGate((current) => (current === "ready" ? current : "boot"));
       clearError("connection");
       try {
-        const current = await requestScope.current.run((signal) => api.session({ signal }));
+        const previous = sessionRef.current;
+        const current =
+          previous?.authenticated && previous.password_required === false
+            ? await sessionRequests.renew(previous)
+            : await requestScope.current.run((signal) => api.session({ signal }));
         if (generation !== connectGeneration.current) return;
-        if (!current.authenticated && sessionRef.current?.authenticated) clearSession();
+        if (!current.authenticated && previous?.authenticated)
+          clearSession(undefined, current.password_required === false ? "offline" : "login");
         sessionRef.current = current;
         setSession(current);
-        setGate(current.authenticated ? "ready" : current.bootstrapped ? "login" : "setup");
+        setGate(
+          current.authenticated
+            ? "ready"
+            : current.password_required === false
+              ? "offline"
+              : current.bootstrapped
+                ? "login"
+                : "setup",
+        );
       } catch (error) {
         if (generation === connectGeneration.current) {
           report("connection", error);
@@ -245,7 +250,7 @@ export function useDownloaderController() {
         }
       }
     },
-    [clearError, clearSession, report],
+    [clearError, clearSession, report, sessionRequests],
   );
   const refreshStorage = useCallback(async () => {
     try {
@@ -347,8 +352,10 @@ export function useDownloaderController() {
       accept: merge,
       state: setLive,
       error: (error) => report("connection", error),
-      expired: () =>
-        clearSession(new ApiError({ status: 401, code: "UNAUTHORIZED", action: "login" })),
+      expired: () => {
+        if (sessionRef.current?.password_required === false) void retryConnection(false);
+        else clearSession(new ApiError({ status: 401, code: "UNAUTHORIZED", action: "login" }));
+      },
     });
     feed.current = manager;
     manager.start();
@@ -376,7 +383,17 @@ export function useDownloaderController() {
       window.removeEventListener("online", online);
       window.removeEventListener("offline", offline);
     };
-  }, [gate, csrf, clearSession, loadHistory, merge, refreshStorage, report, withAuth]);
+  }, [
+    gate,
+    csrf,
+    clearSession,
+    loadHistory,
+    merge,
+    refreshStorage,
+    report,
+    retryConnection,
+    withAuth,
+  ]);
   useEffect(() => {
     const current = activeJobs(entities);
     feed.current?.sync(current);

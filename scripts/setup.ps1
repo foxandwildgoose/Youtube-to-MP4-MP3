@@ -1,4 +1,5 @@
-# Windows PowerShell 5.1 and PowerShell 7: authenticated local Docker profile.
+# Windows PowerShell 5.1 and PowerShell 7: passwordless personal Docker profile.
+# Ordinary Compose automatically loads docker-compose.override.yml.
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 function Invoke-Docker {
@@ -23,5 +24,4 @@ Invoke-Docker -DockerArguments @("compose", "config", "--quiet")
 Invoke-Docker -DockerArguments @("compose", "build")
 Invoke-Docker -DockerArguments @("compose", "up", "-d", "--wait", "--wait-timeout", "90")
 Write-Host "Ready: http://127.0.0.1:8000"
-Write-Host "Initialize the password interactively:"
-Write-Host "  docker compose exec app python -m app.cli bootstrap"
+Write-Host "Open this address in your browser. No login password is needed for personal local use."

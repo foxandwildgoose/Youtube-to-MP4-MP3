@@ -23,6 +23,20 @@ logger = module('run_logged', 'run-logged.py')
 
 
 class PreviewRuntimeTests(unittest.TestCase):
+    def test_personal_preview_opens_without_password_or_browser_bootstrap(self):
+        source = {"PATH": "/usr/bin"}
+        env = runtime.preview_environment(source)
+        self.assertEqual(env["REQUIRE_PASSWORD"], "0")
+        self.assertEqual(env["ALLOW_HTTP_BOOTSTRAP"], "0")
+        self.assertEqual(env["ALLOWED_HOSTS"], "127.0.0.1,localhost")
+        self.assertEqual(source, {"PATH": "/usr/bin"})
+
+    def test_explicit_protected_preview_settings_are_preserved(self):
+        env = runtime.preview_environment({"REQUIRE_PASSWORD": "1", "LOCAL_HTTP": "0", "ALLOWED_HOSTS": "private.example.com"})
+        self.assertEqual(env["REQUIRE_PASSWORD"], "1")
+        self.assertEqual(env["LOCAL_HTTP"], "0")
+        self.assertEqual(env["ALLOWED_HOSTS"], "private.example.com")
+
     def test_independent_api_worker_and_web_recovery_and_repeatability(self):
         for api, worker in ((True, True), (True, False), (False, True), (False, False)):
             with self.subTest(api=api, worker=worker):

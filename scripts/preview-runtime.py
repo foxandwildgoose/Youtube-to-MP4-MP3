@@ -72,11 +72,12 @@ def ensure_components(states: dict[str, str], running, launch) -> None:
             launch(name)
 
 
-def main() -> int:
-    env = os.environ.copy()
+def preview_environment(source: dict[str, str] | None = None) -> dict[str, str]:
+    """Personal preview opens directly; an explicit protected profile is retained."""
+    env = dict(os.environ if source is None else source)
     env.setdefault("DATA_DIR", str(ROOT / "data"))
     env.setdefault("LOCAL_HTTP", "1")
-    env.setdefault("REQUIRE_PASSWORD", "1")
+    env.setdefault("REQUIRE_PASSWORD", "0")
     env.setdefault("ALLOW_HTTP_BOOTSTRAP", "0")
     env.setdefault("ALLOWED_HOSTS", "127.0.0.1,localhost")
     env.setdefault("MEDIA_ADAPTER", "ytdlp")
@@ -85,6 +86,11 @@ def main() -> int:
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONPATH"] = str(ROOT / "backend") + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["PATH"] = str(ROOT / ".venv/bin") + os.pathsep + env.get("PATH", "") + os.pathsep + str(ROOT / "bin")
+    return env
+
+
+def main() -> int:
+    env = preview_environment()
     for name, binary in (("FFMPEG_PATH", "ffmpeg"), ("FFPROBE_PATH", "ffprobe"), ("DENO_PATH", "deno")):
         if not env.get(name):
             found = shutil.which(binary, path=env["PATH"])

@@ -1,0 +1,15 @@
+{
+	admin off
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://{$SEORAP_PUBLIC_HOST} {
+	# The complete SPA and API share this origin. Preserve the browser's Host
+	# and Origin so FastAPI keeps its exact origin and CSRF checks.
+	reverse_proxy app:8000 {
+		# Flush SSE immediately; do not impose a media response/read deadline.
+		flush_interval -1
+	}
+}

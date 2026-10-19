@@ -1,0 +1,59 @@
+# Optional persistent-host HTTPS profile. Use with docker-compose.yml.
+# Keep the existing Compose project name so its SQLite/media volume is reused.
+# SEORAP_PUBLIC_HOST is one DNS hostname only, without scheme, port or path.
+x-https-auth: &https-auth
+  ALLOWED_HOSTS: ${SEORAP_PUBLIC_HOST:?Set SEORAP_PUBLIC_HOST to the persistent app DNS hostname}
+  LOCAL_HTTP: "0"
+  REQUIRE_PASSWORD: "1"
+  ALLOW_HTTP_BOOTSTRAP: "0"
+
+services:
+  app:
+    ports: !override []
+    environment: *https-auth
+
+  worker:
+    environment: *https-auth
+
+  caddy:
+    # Official Caddy 2.11.7 release and verified manifest; no floating upgrade.
+    image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    platform: linux/amd64
+    environment:
+      SEORAP_PUBLIC_HOST: ${SEORAP_PUBLIC_HOST:?Set SEORAP_PUBLIC_HOST to the persistent app DNS hostname}
+      # The Compose-local upstream must not traverse an inherited egress proxy.
+      # Keep all existing exceptions and the proxy itself for external ACME traffic.
+      NO_PROXY: ${NO_PROXY:-},app
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - seorap-caddy-data:/data
+      - seorap-caddy-config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=16777216,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 256m
+    cpus: "0.50"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  seorap-caddy-data:
+  seorap-caddy-config:

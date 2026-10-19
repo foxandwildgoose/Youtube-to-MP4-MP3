@@ -1,0 +1,26 @@
+# Synthetic local TLS only. Never add this file to an operator deployment.
+# Order: base, optional cloud, fixture, https, then this file.
+name: seorap-https-fixture
+
+services:
+  app:
+    # Test containers must not receive the operator's personal .env secrets.
+    env_file: !override
+      - .env.example
+  worker:
+    env_file: !override
+      - .env.example
+  caddy:
+    ports: !override
+      - "127.0.0.1:18480:80"
+      - "127.0.0.1:18443:443"
+    environment:
+      SEORAP_PUBLIC_HOST: conversion.example.com
+    command:
+      - sh
+      - -ec
+      - |
+        sed '/^{/a\    skip_install_trust' /etc/caddy/Caddyfile |
+          sed '/^https:\/\//a\    tls internal' > /tmp/Caddyfile.fixture
+        caddy fmt --overwrite /tmp/Caddyfile.fixture
+        exec caddy run --config /tmp/Caddyfile.fixture --adapter caddyfile

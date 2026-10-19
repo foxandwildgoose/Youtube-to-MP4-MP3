@@ -149,7 +149,7 @@ function mediaBridgePlugin(): Plugin {
   const register = (server: { middlewares: { use: (handler: (...args: any[]) => void) => void } }) => {
     server.middlewares.use(async (req, res, next) => {
       const path = (req.url || '/').split('?', 1)[0];
-      if (path !== '/healthz' && !path.startsWith('/api/')) return next();
+      if (path !== '/' && path !== '/index.html' && path !== '/healthz' && !path.startsWith('/api/')) return next();
       const controller = new AbortController();
       req.on('aborted', () => controller.abort());
       res.on('close', () => controller.abort());
@@ -165,7 +165,10 @@ function mediaBridgePlugin(): Plugin {
           method, headers, signal: controller.signal,
           ...(method !== 'GET' && method !== 'HEAD' ? { body: Readable.toWeb(req) as ReadableStream<Uint8Array>, duplex: 'half' } : {}),
         } as RequestInit);
-        const response = await seorapProxy({ url, req: request }, next) as Response;
+        const response = await seorapProxy({ url, req: request }, next);
+        // Connect's next() returns void. Unowned platform routes and ordinary
+        // root documents have already advanced to their own middleware.
+        if (!(response instanceof Response)) return;
         res.statusCode = response.status;
         response.headers.forEach((value, key) => { if (key !== 'set-cookie') res.setHeader(key, value); });
         for (const cookie of response.headers.getSetCookie()) res.appendHeader('set-cookie', cookie);

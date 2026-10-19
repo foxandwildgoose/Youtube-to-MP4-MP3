@@ -67,16 +67,22 @@ codec/bitrate/protocol 표현과 분리한다. 허용 표현 중 품질 기준�
 Grok 프로필은8080 개발 서버,8081 빌드 확인과 루프백 처리 서비스가 함께 있어야 한다.
 Grok PWA injector, 브랜딩, PreviewHostBridge와 사전 연결된 플랫폼 소스는 보존한다.
 들어온 실제 Host/Origin/본문을 검사한 뒤에만 개발 프록시가 trusted loopback 헤더를
-쓴다. `.env`의 운영 인증을 preview가 몰래 끄지 않는다. frontend-only Vercel 출력은
-영구 작업자/미디어 저장소를 제공하지 않으며 API 없는 상태는 오류로 표시한다.
+쓴다. `.env`의 운영 인증을 preview가 몰래 끄지 않는다. Vercel 출력은 영구 작업자와
+미디어 저장소를 제공하지 않는다. 서버 전용 `SEORAP_APP_ORIGIN`이 있으면 시작 문서를
+전체 앱의 정식 HTTPS 출처로 이동시키고, 없으면503 배포 설정 안내를 표시한다.
+API·SSE·파일 중계 및 출처 간 세션 쿠키 전달은 하지 않는다. 기존 문서는 기본 링크로
+앱을 다시 연다. Grok PWA 설치 경로는 이동시키지 않는다.
 
 scrypt 비밀번호, 해시된 HttpOnly 세션, CSRF, 동일 출처 Host/Origin을 유지한다.
 잘못된 boolean 환경변수는 구성 오류로 거부해 오타가 인증 해제로 해석되지 않는다.
 운영 SPA HTML마다 style nonce를 발급하고 응답 CSP·meta·Radix의 get-nonce에 같은
 값을 연결한다. 대화상자 scroll-lock 스타일은 허용하되 script CSP를 완화하지 않는다.
 nonce가 든 HTML은 no-store다.
-기본 공개 포트는127.0.0.1이다. LAN/VPN/공개 서비스는 별도 검증한 인증·TLS·egress
-계약 없이는 지원하지 않는다. canonical YouTube URL과 썸네일 DNS 고정은 yt-dlp의
+기본 공개 포트는127.0.0.1이다. 운영자가 관리하는 HTTPS 호스트에서는
+`docker-compose.https.yml`로 Caddy만80/443에 공개하고 원래 데이터 볼륨을 유지한다.
+이 구성의 로컬 TLS·인증·파일 전송 검증과 운영 DNS·ACME·egress 검증은 구분한다.
+자세한 전제는 [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md)에 있다.
+canonical YouTube URL과 썸네일 DNS 고정은 yt-dlp의
 모든 CDN/리다이렉트를 방화벽으로 가두는 것과 다르다. 이 변경은 공개 서비스의
 SSRF 차단을 주장하지 않으며 쿠키 수입·DRM/멤버 우회·CAPTCHA 우회·임의 옵션을
 추가하지 않는다. 로컬 데이터 디렉터리 변조 검사는 조건부 파일 경계 강화이다.

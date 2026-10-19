@@ -39,8 +39,26 @@ jobs:
       - run: python scripts/check-backup.py
       - run: npm run build:spa
       - run: npm run build
+      - run: npm run check:vercel
       - name: Clean Compose configuration
         run: cp .env.example .env && docker compose config --quiet
+      - name: Authenticated HTTPS deployment boundary
+        env:
+          SEORAP_PUBLIC_HOST: downloads.example.com
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.https.yml config --format json > "$RUNNER_TEMP/seorap-https.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          config = json.loads((Path(os.environ['RUNNER_TEMP']) / 'seorap-https.json').read_text())
+          services = config['services']
+          assert not services['app'].get('ports') and not services['worker'].get('ports')
+          assert {int(port['published']) for port in services['caddy']['ports']} == {80, 443}
+          for name in ('app', 'worker'):
+              env = services[name]['environment']
+              assert env['ALLOWED_HOSTS'] == 'downloads.example.com'
+              assert env['LOCAL_HTTP'] == '0' and env['REQUIRE_PASSWORD'] == '1' and env['ALLOW_HTTP_BOOTSTRAP'] == '0'
+          PY
   supported-image:
     runs-on: ubuntu-latest
     steps:

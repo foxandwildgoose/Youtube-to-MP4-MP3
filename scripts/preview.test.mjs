@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
+import { createServer } from "node:http";
 import {
   isAlive,
   looksLikePreviewProcess,
@@ -14,11 +15,36 @@ import {
   previewOwners,
   stopOutcome,
   terminatePids,
+  waitForReady,
 } from "./preview.mjs";
 
 test("parsePreviewArgs accepts the two actions", () => {
   for (const action of ["stop", "restart"]) {
     assert.deepEqual(parsePreviewArgs([action]), { action });
+  }
+});
+
+test("readiness accepts an actual redirect without requesting its destination", async () => {
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url);
+    if (request.url === "/") {
+      response.writeHead(307, { location: "/must-not-follow" });
+    } else {
+      response.writeHead(200);
+    }
+    response.end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const ready = await waitForReady(() => null, `http://127.0.0.1:${server.address().port}/`);
+    assert.equal(ready, true);
+    assert.deepEqual(requests, ["/"]);
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
   }
 });
 

@@ -22,6 +22,13 @@ const ko = {
   offlineTitle: "변환 서버에 연결할 수 없습니다",
   offlineBody:
     "연결을 확인한 뒤 다시 시도해 주세요. 연결만으로 실제 다운로드가 완료되지는 않습니다.",
+  deploymentTitle: "변환 서비스 연결이 아직 완료되지 않았습니다",
+  deploymentBody:
+    "운영자가 파일을 만들고 보관하는 앱을 연결해야 합니다. 연결이 완료되기 전에는 변환 작업을 시작할 수 없습니다.",
+  handoffTitle: "연결된 앱을 다시 열어 주세요",
+  handoffBody:
+    "연결된 앱에서 파일 만들기를 계속할 수 있습니다. 이 화면에서는 아직 변환을 시작하지 않았습니다.",
+  openApp: "앱 열기",
   checking: "연결 확인 중",
   checkAgain: "다시 확인",
   reconnect: "연결 다시 확인",
@@ -259,6 +266,13 @@ const en: Dictionary = {
   offlineTitle: "Cannot connect to the processing service",
   offlineBody:
     "Check the connection and try again. A connection alone does not establish a successful download.",
+  deploymentTitle: "The conversion service connection is not configured yet",
+  deploymentBody:
+    "The owner needs to connect the app that creates and stores files. Conversion cannot start until that connection is complete.",
+  handoffTitle: "Reopen the connected app",
+  handoffBody:
+    "Continue creating files in the connected app. No conversion has started on this screen.",
+  openApp: "Open app",
   checking: "Checking connection",
   checkAgain: "Check again",
   reconnect: "Check connection again",
@@ -473,7 +487,41 @@ export function translate(locale: Locale): Copy {
   return locale === "en" ? en : ko;
 }
 
+export function offlinePresentation(locale: Locale, code?: string) {
+  const t = translate(locale);
+  if (code === "APP_HANDOFF_REQUIRED") {
+    return {
+      title: t.handoffTitle,
+      body: t.handoffBody,
+      action: "open_app" as const,
+      actionLabel: t.openApp,
+    };
+  }
+  if (code === "DEPLOYMENT_NOT_CONFIGURED") {
+    return {
+      title: t.deploymentTitle,
+      body: t.deploymentBody,
+      action: "retry" as const,
+      actionLabel: t.checkAgain,
+    };
+  }
+  return {
+    title: t.offlineTitle,
+    body: t.offlineBody,
+    action: "retry" as const,
+    actionLabel: t.checkAgain,
+  };
+}
+
 const errorCopy: Record<string, [string, string]> = {
+  DEPLOYMENT_NOT_CONFIGURED: [
+    "운영자가 변환과 파일 보관을 제공하는 앱에 연결해야 합니다.",
+    "The owner needs to connect the app that provides conversion and file storage.",
+  ],
+  APP_HANDOFF_REQUIRED: [
+    "‘앱 열기’를 눌러 연결된 앱으로 이동해 주세요.",
+    "Choose Open app to continue in the connected app.",
+  ],
   INVALID_URL: ["올바른 YouTube 영상 주소를 입력해 주세요.", "Enter a valid YouTube video URL."],
   UNSUPPORTED_URL: [
     "이 주소는 단일 영상이 아닙니다. watch, youtu.be, Shorts 주소를 사용해 주세요.",

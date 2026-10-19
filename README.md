@@ -14,7 +14,8 @@ React·FastAPI·별도 작업자·SQLite·yt-dlp·FFmpeg 구조를 유지했습�
 Docker Engine/Desktop와 Compose **2.24.4 이상**, Linux amd64 이미지를 사용합니다.
 ARM 머신은 명시적 amd64 에뮬레이션이 필요하며 네이티브 ARM 이미지는 지원하지 않습니다.
 앱과 작업자는 UID10001, 읽기 전용 루트, 전용 영구 볼륨을 사용하고
-`127.0.0.1:8000`에만 공개합니다. LAN/공개 서버로 바꾸는 배포는 이 지원 범위가 아닙니다.
+`127.0.0.1:8000`에만 공개합니다. 별도 소유 호스트의 단일 운영자 HTTPS 구성은
+[Vercel과 변환 서버 연결](docs/VERCEL_DEPLOYMENT.md)을 따릅니다.
 
 Linux/macOS:
 
@@ -156,6 +157,13 @@ npm run preview:stop
 관리형 클라우드에서 중첩 Docker의 프록시 CA가 필요하면
 `docker-compose.cloud.yml`을 추가하고 `CODEX_PROXY_CERT` 바인딩을 사용합니다.
 TLS/서명/체크섬 검증을 끄지 않습니다.
+
+Vercel의 `Ready`는 웹 빌드 배포 상태입니다. FastAPI·작업자·SQLite·미디어 파일이
+그 배포만으로 생성되지는 않습니다. Vercel에서 서버 주소가 없으면 서비스 연결이
+필요하다는 상태를 표시합니다. 전체 앱을 제공하는 HTTPS 호스트가 준비되면 Vercel의
+서버 환경변수 `SEORAP_APP_ORIGIN`에 해당 origin을 설정하고 재배포하세요.
+Vercel 진입 주소에서 전체 앱으로 이동하며 로그인·SSE·대용량 파일 전송은 동일한
+변환 서버 주소에서 처리합니다. 자세한 명령과 전제는 위 배포 문서에 있습니다.
 
 ## 업데이트·백업·복원
 

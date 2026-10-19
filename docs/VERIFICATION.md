@@ -7,6 +7,9 @@
 과거 작성자의 기록은 [VERIFICATION_BASELINE.md](VERIFICATION_BASELINE.md)에
 보존하며 아래 새 결과와 합산하지 않는다.
 
+Vercel 공개 Host의403과 HTTPS 앱 연결에 대한 후속 수정·실행 결과는
+[VERIFICATION_VERCEL_FIX.md](VERIFICATION_VERCEL_FIX.md)에 별도로 기록한다.
+
 ## 검사 환경
 
 - 호스트: Linux amd64, Python3.12.14, Node24.19.0/npm11.9.0,

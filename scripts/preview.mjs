@@ -290,12 +290,13 @@ async function stop(announce = true) {
   return true;
 }
 
-async function waitForReady(failure) {
+export async function waitForReady(failure, url = PREVIEW_URL) {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline && failure() === null) {
     try {
-      // Any HTTP response means the server is bound; a 404 is still ready.
-      await fetch(PREVIEW_URL, { signal: AbortSignal.timeout(2000) });
+      // Any HTTP response means the server is bound, including a hosted handoff.
+      // Readiness must never follow that redirect to an external service.
+      await fetch(url, { signal: AbortSignal.timeout(2000), redirect: "manual" });
       return true;
     } catch {
       await sleep(250);

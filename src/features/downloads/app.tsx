@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 import type { Choice, Job } from "./api";
-import { translate } from "./i18n";
+import { offlinePresentation, translate } from "./i18n";
 import { useDownloaderController } from "./use-downloader-controller";
 import { JobCard } from "./components/job-card";
 import { SettingsDialog } from "./components/settings-dialog";
@@ -59,6 +59,7 @@ export function DownloaderApp() {
   const c = useDownloaderController(),
     { locale, theme, analysis, settings } = c;
   const t = translate(locale);
+  const offlineCopy = offlinePresentation(locale, c.errors.connection?.code);
   const [mode, setMode] = useState<Mode>("mp4");
   const [useOriginal, setUseOriginal] = useState(false);
   const [showConversion, setShowConversion] = useState(false);
@@ -284,17 +285,23 @@ export function DownloaderApp() {
       ) : null}
       {c.gate === "offline" ? (
         <section className="gate-card" id="main-task">
-          <h2>{t.offlineTitle}</h2>
-          <p className="muted">{t.offlineBody}</p>
+          <h2>{offlineCopy.title}</h2>
+          <p className="muted">{offlineCopy.body}</p>
           <ErrorNotice error={c.errors.connection} locale={locale} />
-          <button
-            className="button primary"
-            type="button"
-            disabled={c.authBusy}
-            onClick={() => void c.retryConnection()}
-          >
-            <BusyLabel busy={c.authBusy}>{t.checkAgain}</BusyLabel>
-          </button>
+          {offlineCopy.action === "open_app" ? (
+            <a className="button primary" href="/">
+              {offlineCopy.actionLabel}
+            </a>
+          ) : (
+            <button
+              className="button primary"
+              type="button"
+              disabled={c.authBusy}
+              onClick={() => void c.retryConnection()}
+            >
+              <BusyLabel busy={c.authBusy}>{offlineCopy.actionLabel}</BusyLabel>
+            </button>
+          )}
         </section>
       ) : null}
       {c.gate === "login" || c.gate === "setup" ? (

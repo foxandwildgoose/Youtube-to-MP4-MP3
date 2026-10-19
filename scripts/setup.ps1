@@ -1,18 +1,27 @@
-# Windows PowerShell operator setup for the loopback Docker deployment.
+# Windows PowerShell 5.1 and PowerShell 7: authenticated local Docker profile.
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
-
+function Invoke-Docker {
+    param([Parameter(Mandatory = $true)][string[]]$DockerArguments)
+    & docker @DockerArguments
+    $code = $LASTEXITCODE
+    if ($code -ne 0) { throw "Docker failed with exit code $code." }
+}
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-  throw "Docker is required."
+    throw "Docker CLI is missing. Install Docker Desktop and Compose v2."
 }
-
+Invoke-Docker -DockerArguments @("compose", "version")
+Invoke-Docker -DockerArguments @("info")
 if (-not (Test-Path ".env")) {
-  Copy-Item ".env.example" ".env"
-  Write-Host "Wrote .env from .env.example. Review the limits before large jobs."
+    if (-not (Test-Path ".env.example")) {
+        throw "Missing .env.example; restore the source template before setup."
+    }
+    Copy-Item ".env.example" ".env"
+    Write-Host "Created .env from .env.example; existing configurations are preserved."
 }
-
-docker compose build
-docker compose up -d
-Write-Host "Open http://127.0.0.1:8000"
-Write-Host "Set the password in a terminal when ALLOW_HTTP_BOOTSTRAP=0:"
-Write-Host "  docker compose exec -it app python -m app.cli bootstrap"
+Invoke-Docker -DockerArguments @("compose", "config", "--quiet")
+Invoke-Docker -DockerArguments @("compose", "build")
+Invoke-Docker -DockerArguments @("compose", "up", "-d", "--wait", "--wait-timeout", "90")
+Write-Host "Ready: http://127.0.0.1:8000"
+Write-Host "Initialize the password interactively:"
+Write-Host "  docker compose exec app python -m app.cli bootstrap"

@@ -1,0 +1,28 @@
+# Managed-cloud Docker-in-Docker only. Preserve the inherited proxy settings.
+# CODEX_PROXY_CERT and the combined system bundle are public CA trust, not secrets.
+services:
+  volume-init:
+    build:
+      secrets:
+        - proxy_ca
+        - proxy_bundle
+  app:
+    environment:
+      NODE_EXTRA_CA_CERTS: /run/proxy-ca.pem
+      SSL_CERT_FILE: /run/proxy-bundle.pem
+      REQUESTS_CA_BUNDLE: /run/proxy-bundle.pem
+    volumes:
+      - ${CODEX_PROXY_CERT:?CODEX_PROXY_CERT is required}:/run/proxy-ca.pem:ro
+      - ${SEORAP_PROXY_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}:/run/proxy-bundle.pem:ro
+  worker:
+    environment:
+      SSL_CERT_FILE: /run/proxy-bundle.pem
+      REQUESTS_CA_BUNDLE: /run/proxy-bundle.pem
+    volumes:
+      - ${CODEX_PROXY_CERT:?CODEX_PROXY_CERT is required}:/run/proxy-ca.pem:ro
+      - ${SEORAP_PROXY_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}:/run/proxy-bundle.pem:ro
+secrets:
+  proxy_ca:
+    file: ${CODEX_PROXY_CERT:?CODEX_PROXY_CERT is required}
+  proxy_bundle:
+    file: ${SEORAP_PROXY_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}

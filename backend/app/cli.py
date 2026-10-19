@@ -18,7 +18,7 @@ def main() -> None:
     args = parser.parse_args()
     settings = load_settings()
     validate_limits(settings)
-    init_db(settings)
+    init_db(settings).close()
     conn = connect(settings)
     try:
         if args.command == "bootstrap":

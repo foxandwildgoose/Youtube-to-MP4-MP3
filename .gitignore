@@ -12,3 +12,15 @@ data/
 screenshots/
 *.log
 .DS_Store
+.vercel/output/
+.grok/preview.pid
+.grok/preview-state.json
+bin/
+.env.*
+!.env.example
+.pytest_cache/
+coverage/
+playwright-report/
+test-results/
+*.pid
+.cache/

@@ -356,6 +356,17 @@ def test_403_refresh_then_success(api, settings):
     job_id = created.json()["id"]
     assert claim_next(settings, "w") == job_id
     process_job(settings, job_id)
+    waiting = api.client.get(f"/api/v1/jobs/{job_id}").json()
+    assert waiting["status"] == "queued", waiting
+    assert waiting["phase"] == "retry_wait"
+    assert claim_next(settings, "w") is None
+    conn = connect(settings)
+    try:
+        conn.execute("UPDATE jobs SET next_attempt_at = ? WHERE id = ?", (utc_iso(utc_now() - timedelta(seconds=1)), job_id))
+    finally:
+        conn.close()
+    assert claim_next(settings, "w") == job_id
+    process_job(settings, job_id)
     body = api.client.get(f"/api/v1/jobs/{job_id}").json()
     assert body["status"] == "succeeded", body
 

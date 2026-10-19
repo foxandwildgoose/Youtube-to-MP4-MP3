@@ -1,0 +1,114 @@
+name: Verify supported local downloader
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: backend
+      DATA_DIR: /tmp/seorap-ci-source-state
+      # LIVE_TEST_URL is intentionally absent: fixtures never imply provider success.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: sh scripts/install-deno.sh "$RUNNER_TEMP/seorap-bin"
+      - run: echo "$RUNNER_TEMP/seorap-bin" >> "$GITHUB_PATH"
+      - run: npm install --global npm@11.9.0
+      - run: npm ci
+      - run: python -m pip install -r backend/requirements-test.txt
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run test:downloads
+      - run: npm run check:contracts
+      - run: python -m unittest discover -s scripts -p test_preview_runtime.py -v
+      - run: python -m unittest discover -s scripts -p test_fixture_generator.py -v
+      - run: python -m pytest backend/tests
+      - run: python scripts/check-backup.py
+      - run: npm run build:spa
+      - run: npm run build
+      - name: Clean Compose configuration
+        run: cp .env.example .env && docker compose config --quiet
+  supported-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm install --global npm@11.9.0
+      - run: npm ci
+      - run: python -m pip install -r backend/requirements-test.txt
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: npx playwright install --with-deps chromium
+      - run: node --input-type=module -e "import {chromium} from 'playwright'; console.log('CHROMIUM_PATH=' + chromium.executablePath())" >> "$GITHUB_ENV"
+      - name: Build production image from clean source
+        run: docker build --platform linux/amd64 --target runtime -t seorap:local .
+      - name: Build isolated fixture test image
+        run: docker build --platform linux/amd64 --target test -t seorap:test .
+      - name: Fixture regressions as nonroot with read-only image
+        run: docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,size=34359738368,mode=1777 --init seorap:test
+      - name: Start protected profile and check API plus worker health
+        run: cp .env.example .env && docker compose up -d --wait --wait-timeout 90
+      - name: Prepare an isolated synthetic fixture stack
+        env:
+          SEORAP_FIXTURE_DIR: ${{ runner.temp }}/seorap-fixtures
+        run: |
+          python scripts/create-fixtures.py --output "$SEORAP_FIXTURE_DIR"
+          docker compose -f docker-compose.yml -f docker-compose.fixture.yml up -d --wait --wait-timeout 90
+          python scripts/bootstrap-fixture.py --password-file "$RUNNER_TEMP/seorap-test-password"
+      - name: Prepare scoped browser output and cache directories
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" /workspace/screenshots /workspace/.cache/npm /workspace/.cache/agent-browser
+      - name: Authenticated fixture browser journeys
+        env:
+          SEORAP_BROWSER_URL: http://127.0.0.1:18000
+          SEORAP_BROWSER_PASSWORD_FILE: ${{ runner.temp }}/seorap-test-password
+          SEORAP_FIXTURE_DIR: ${{ runner.temp }}/seorap-fixtures
+          SEORAP_COMPOSE_PROJECT: seorap-fixture
+          SEORAP_COMPOSE_FILES: docker-compose.yml,docker-compose.fixture.yml
+        run: npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: authenticated-fixture-browser
+          path: /workspace/screenshots/
+          if-no-files-found: ignore
+      - name: Preserve diagnostics
+        if: failure()
+        run: docker compose ps -a && docker compose logs --tail 100
+      - name: Stop without deleting persistent data
+        if: always()
+        env:
+          SEORAP_FIXTURE_DIR: ${{ runner.temp }}/seorap-fixtures
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.fixture.yml down
+          docker compose down
+  powershell-setup:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Native-exit regression harness
+        shell: ${{ matrix.shell }}
+        run: node --test scripts/setup-powershell.test.mjs

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 from dataclasses import dataclass
@@ -12,20 +13,37 @@ def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw == "":
         return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    # A misspelled authentication flag must not silently turn protection off.
+    raise SystemExit(f"Unsupported configuration: {name} must be a boolean (0/1, false/true, no/yes, off/on)")
 
 
 def _int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw == "":
         return default
-    return int(raw)
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"Unsupported configuration: {name} must be an integer") from exc
+
+
+def _float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    try:
+        return default if raw is None or raw == "" else float(raw)
+    except ValueError as exc:
+        raise SystemExit(f"Unsupported configuration: {name} must be numeric") from exc
 
 
 def _path_env(name: str, fallback: str) -> str:
     raw = os.environ.get(name)
     if raw:
-        return raw
+        return shutil.which(raw) or raw
     found = shutil.which(Path(fallback).name)
     if found:
         return found
@@ -136,7 +154,7 @@ def load_settings() -> Settings:
         history_retention_seconds=_int("HISTORY_RETENTION_SECONDS", 90 * 24 * 3600),
         max_auto_retries=_int("MAX_AUTO_RETRIES", 2),
         session_ttl_seconds=_int("SESSION_TTL_SECONDS", 12 * 3600),
-        sse_heartbeat_seconds=float(os.environ.get("SSE_HEARTBEAT_SECONDS", "5")),
+        sse_heartbeat_seconds=_float("SSE_HEARTBEAT_SECONDS", 5),
         cookie_name=os.environ.get("SESSION_COOKIE", "seorap_session"),
         ffmpeg_path=_path_env("FFMPEG_PATH", "/usr/local/bin/ffmpeg"),
         ffprobe_path=_path_env("FFPROBE_PATH", "/workspace/bin/ffprobe"),
@@ -151,12 +169,20 @@ def validate_limits(settings: Settings) -> None:
         problems.append("MEDIA_ADAPTER must be ytdlp or fixture")
     if settings.media_adapter == "fixture" and not settings.allow_fixture_urls:
         problems.append("fixture adapter requires ALLOW_FIXTURE_URLS=1")
-    if settings.media_concurrency < 1:
-        problems.append("MEDIA_CONCURRENCY must be >= 1")
-    if settings.analysis_concurrency < 1:
-        problems.append("ANALYSIS_CONCURRENCY must be >= 1")
-    if settings.max_waiting_jobs < 1:
-        problems.append("MAX_WAITING_JOBS must be >= 1")
+    if settings.media_concurrency != 1:
+        problems.append("MEDIA_CONCURRENCY must be 1 (the worker supports one media task)")
+    positive_fields = (
+        "analysis_concurrency", "max_waiting_jobs", "analysis_ttl_seconds", "analysis_deadline_seconds",
+        "max_source_duration_seconds", "native_mp4_cap", "default_mp4_cap", "conversion_cap",
+        "max_input_bytes", "max_output_bytes", "max_workspace_bytes", "max_storage_bytes",
+        "active_job_deadline_seconds", "file_ttl_seconds", "history_retention_seconds",
+        "session_ttl_seconds", "log_max_bytes",
+    )
+    for name in positive_fields:
+        if getattr(settings, name) < 1:
+            problems.append(f"{name.upper()} must be >= 1")
+    if not math.isfinite(settings.sse_heartbeat_seconds) or settings.sse_heartbeat_seconds <= 0:
+        problems.append("SSE_HEARTBEAT_SECONDS must be finite and > 0")
     if settings.default_mp4_cap > settings.native_mp4_cap:
         problems.append("DEFAULT_MP4_CAP cannot exceed NATIVE_MP4_CAP")
     if settings.conversion_cap > settings.native_mp4_cap:
@@ -173,8 +199,8 @@ def validate_limits(settings: Settings) -> None:
         problems.append("analysis timing is inconsistent")
     if settings.file_ttl_seconds < 1 or settings.active_job_deadline_seconds < 1:
         problems.append("job timing is inconsistent")
-    if settings.max_auto_retries < 0:
-        problems.append("MAX_AUTO_RETRIES cannot be negative")
+    if not 0 <= settings.max_auto_retries <= 10:
+        problems.append("MAX_AUTO_RETRIES must be between 0 and 10")
     if not settings.allowed_hosts:
         problems.append("ALLOWED_HOSTS cannot be empty")
     if problems:

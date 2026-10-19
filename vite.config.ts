@@ -1,4 +1,6 @@
 import { readdirSync } from "node:fs";
+import { Readable } from "node:stream";
+import seorapProxy from "./server/middleware/seorap-proxy.ts";
 import { join } from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vite";
@@ -142,6 +144,42 @@ function authPopupPlugin(): Plugin {
   };
 }
 
+/** Same validated streaming bridge in dev and built preview. */
+function mediaBridgePlugin(): Plugin {
+  const register = (server: { middlewares: { use: (handler: (...args: any[]) => void) => void } }) => {
+    server.middlewares.use(async (req, res, next) => {
+      const path = (req.url || '/').split('?', 1)[0];
+      if (path !== '/healthz' && !path.startsWith('/api/')) return next();
+      const controller = new AbortController();
+      req.on('aborted', () => controller.abort());
+      res.on('close', () => controller.abort());
+      try {
+        const url = new URL(req.url || '/', 'http://' + (req.headers.host || 'invalid'));
+        const headers = new Headers();
+        for (const [key, value] of Object.entries(req.headers)) {
+          if (Array.isArray(value)) for (const item of value) headers.append(key, item);
+          else if (typeof value === 'string') headers.set(key, value);
+        }
+        const method = (req.method || 'GET').toUpperCase();
+        const request = new Request(url, {
+          method, headers, signal: controller.signal,
+          ...(method !== 'GET' && method !== 'HEAD' ? { body: Readable.toWeb(req) as ReadableStream<Uint8Array>, duplex: 'half' } : {}),
+        } as RequestInit);
+        const response = await seorapProxy({ url, req: request }, next) as Response;
+        res.statusCode = response.status;
+        response.headers.forEach((value, key) => { if (key !== 'set-cookie') res.setHeader(key, value); });
+        for (const cookie of response.headers.getSetCookie()) res.appendHeader('set-cookie', cookie);
+        if (!response.body || method === 'HEAD') return res.end();
+        Readable.fromWeb(response.body as import('node:stream/web').ReadableStream).on('error', () => res.destroy()).pipe(res);
+      } catch {
+        if (!res.headersSent) { res.statusCode = 400; res.end('Invalid media request'); }
+        else res.destroy();
+      }
+    });
+  };
+  return { name: 'seorap:validated-media-bridge', configureServer: register, configurePreviewServer: register };
+}
+
 // `0.0.0.0:8080` is the live-preview contract — don't change host/port.
 // The dev server starts once `src/router.tsx` and `src/routes/` exist — see
 // AGENTS.md § "First scaffold".
@@ -150,67 +188,18 @@ export default defineConfig(({ command, isPreview }) => ({
     host: "0.0.0.0",
     port: 8080,
     strictPort: true,
-    proxy: {
-      "/api": {
-        target: "http://127.0.0.1:8000",
-        changeOrigin: true,
-        timeout: 0,
-        proxyTimeout: 0,
-        configure(proxy) {
-          proxy.on("proxyReq", (proxyReq) => {
-            proxyReq.setHeader("host", "127.0.0.1:8000");
-            proxyReq.setHeader("origin", "http://127.0.0.1:8000");
-          });
-        },
-      },
-      "/healthz": {
-        target: "http://127.0.0.1:8000",
-        changeOrigin: true,
-        timeout: 0,
-        proxyTimeout: 0,
-        configure(proxy) {
-          proxy.on("proxyReq", (proxyReq) => {
-            proxyReq.setHeader("host", "127.0.0.1:8000");
-            proxyReq.setHeader("origin", "http://127.0.0.1:8000");
-          });
-        },
-      },
-    },
+
 
   },
   preview: {
     host: "127.0.0.1",
     port: 8081,
     strictPort: true,
-    proxy: {
-      "/api": {
-        target: "http://127.0.0.1:8000",
-        changeOrigin: true,
-        timeout: 0,
-        proxyTimeout: 0,
-        configure(proxy) {
-          proxy.on("proxyReq", (proxyReq) => {
-            proxyReq.setHeader("host", "127.0.0.1:8000");
-            proxyReq.setHeader("origin", "http://127.0.0.1:8000");
-          });
-        },
-      },
-      "/healthz": {
-        target: "http://127.0.0.1:8000",
-        changeOrigin: true,
-        timeout: 0,
-        proxyTimeout: 0,
-        configure(proxy) {
-          proxy.on("proxyReq", (proxyReq) => {
-            proxyReq.setHeader("host", "127.0.0.1:8000");
-            proxyReq.setHeader("origin", "http://127.0.0.1:8000");
-          });
-        },
-      },
-    },
+
   },
   resolve: { tsconfigPaths: true },
   plugins: [
+    mediaBridgePlugin(),
     pgliteBootstrapPlugin(),
     // Before tanstackStart so /auth/popup never falls through to the SPA.
     authPopupPlugin(),

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.format_planner import norm_acodec, norm_vcodec
+from app.errors import AppError
 
 
 def emit(payload: dict[str, Any]) -> None:
@@ -22,18 +23,14 @@ def emit(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def fail(code: str, message: str, *, retryable: bool = False) -> None:
-    emit({"type": "error", "code": code, "message": message, "retryable": retryable})
+def fail(code: str, message: str, *, retryable: bool = False, retry_after: int | None = None) -> None:
+    emit({"type": "error", "code": code, "message": message, "retryable": retryable, "retry_after": retry_after})
     raise SystemExit(2)
 
 
 def classify_message(text: str) -> tuple[str, bool]:
     lowered = text.lower()
     if "429" in text or "too many request" in lowered or "rate limit" in lowered:
-        retry_after = None
-        for token in text.split():
-            if token.isdigit() and "retry" in lowered:
-                retry_after = int(token)
         return "SOURCE_RATE_LIMITED", False
     if any(phrase in lowered for phrase in ("sign in", "login required", "private video", "members only", "join this channel")):
         return "SOURCE_AUTH_REQUIRED", False
@@ -46,6 +43,38 @@ def classify_message(text: str) -> tuple[str, bool]:
     if any(phrase in lowered for phrase in ("timed out", "timeout", "temporarily", "connection reset", "network")):
         return "ENGINE_ERROR", True
     return "ENGINE_ERROR", False
+
+
+def _retry_after(error: Exception) -> int | None:
+    """Use provider Retry-After metadata only, never an unrelated numeric token."""
+    import re
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+    pending, seen = [error], set()
+    for _ in range(8):
+        if not pending:
+            break
+        current = pending.pop(0)
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        headers = getattr(current, "headers", None) or getattr(response, "headers", None)
+        value = headers.get("Retry-After") if headers is not None else None
+        if value:
+            try:
+                return max(1, int(value))
+            except (TypeError, ValueError):
+                try:
+                    return max(1, int((parsedate_to_datetime(str(value)) - datetime.now(timezone.utc)).total_seconds()) + 1)
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        pending.extend([getattr(current, "__cause__", None), getattr(current, "__context__", None)])
+        exc_info = getattr(current, "exc_info", None)
+        if exc_info and len(exc_info) > 1:
+            pending.append(exc_info[1])
+    match = re.search(r"retry[- ]after\s*[:=]?\s*(\d+)\b", str(error), flags=re.I)
+    return max(1, int(match.group(1))) if match else None
 
 
 def main() -> None:
@@ -64,15 +93,19 @@ def main() -> None:
             listing = playlist(payload)
             emit({"type": "result", "ok": True, "playlist": listing})
         elif action == "job":
-            run_job(payload)
-            emit({"type": "result", "ok": True, "output": payload["output_path"]})
+            checked = run_job(payload)
+            emit({"type": "result", "ok": True, "output": payload["output_path"], "checked": checked})
         else:
             fail("ENGINE_ERROR", "Unknown engine action.")
     except SystemExit:
         raise
+    except AppError as exc:
+        emit({"type": "error", "code": exc.code, "message": "The operation could not continue.",
+              "retryable": exc.retryable, "retry_after": exc.retry_after})
+        raise SystemExit(2)
     except Exception as exc:  # noqa: BLE001 — last-resort boundary of the subprocess
         code, retryable = classify_message(str(exc))
-        fail(code, "The media engine failed.", retryable=retryable)
+        fail(code, "The media engine failed.", retryable=retryable, retry_after=_retry_after(exc) if code == "SOURCE_RATE_LIMITED" else None)
 
 
 def probe(payload: dict[str, Any]) -> dict[str, Any]:
@@ -88,15 +121,13 @@ def playlist(payload: dict[str, Any]) -> dict[str, Any]:
     return ytdlp_playlist(payload, limit)
 
 
-def run_job(payload: dict[str, Any]) -> None:
+def run_job(payload: dict[str, Any]) -> dict[str, Any] | None:
     work = Path(payload["work_dir"])
     work.mkdir(parents=True, exist_ok=True)
 
     def load_info() -> dict[str, Any]:
-        if payload.get("adapter") == "fixture":
-            return _fixture_info(payload)
-        info = ytdlp_probe(payload, download=False)
-        _reject_ineligible(info)
+        info = _fixture_info(payload) if payload.get("adapter") == "fixture" else ytdlp_probe(payload, download=False)
+        _reject_ineligible(info, payload)
         return info
 
     info = _with_slot(payload, load_info)
@@ -109,27 +140,44 @@ def run_job(payload: dict[str, Any]) -> None:
         sources = [fixture_materialize(payload, work)]
     else:
         sources = ytdlp_download(payload, work, resolved)
-    _ffmpeg_finish(payload, sources, resolved)
+    return _ffmpeg_finish(payload, sources, resolved)
 
 
 def _with_slot(payload: dict[str, Any], fn):
     if not payload.get("manage_slot"):
         return fn()
+    import signal
     from app.config import load_settings
+    from app.services.analysis import assert_no_cooldown
+    from app.db import connect
     from app.services.slots import acquire_slot, release_slot
 
+    from dataclasses import replace
     settings = load_settings()
+    if payload.get("analysis_deadline_seconds"):
+        settings = replace(settings, analysis_deadline_seconds=int(payload["analysis_deadline_seconds"]))
     slot_id = None
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + min(20, settings.analysis_deadline_seconds)
     while slot_id is None and time.monotonic() < deadline:
         slot_id = acquire_slot(settings, "job-probe")
         if slot_id is None:
             time.sleep(0.2)
     if slot_id is None:
-        fail("LIMIT_EXCEEDED", "Analysis capacity is in use.", retryable=True)
+        fail("ENGINE_ERROR", "Analysis capacity is in use.", retryable=True)
+    def timed_out(signum, frame):
+        fail("JOB_TIMEOUT", "Source analysis exceeded its deadline.", retryable=True)
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    signal.setitimer(signal.ITIMER_REAL, settings.analysis_deadline_seconds)
     try:
+        conn = connect(settings)
+        try:
+            assert_no_cooldown(conn)
+        finally:
+            conn.close()
         return fn()
     finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
         release_slot(settings, slot_id)
 
 
@@ -155,7 +203,9 @@ def _fixture_info(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _reject_ineligible(info: dict[str, Any]) -> None:
+def _reject_ineligible(info: dict[str, Any], payload: dict[str, Any] | None = None) -> None:
+    if (payload or {}).get("max_source_duration_seconds") and info.get("duration") and float(info["duration"]) > float(payload["max_source_duration_seconds"]):
+        fail("LIMIT_EXCEEDED", "The source duration exceeds the configured limit.")
     live = info.get("live_status")
     if live in {"is_live", "is_upcoming", "post_live"}:
         fail("SOURCE_UNAVAILABLE", "Live or upcoming videos are not accepted.")
@@ -167,7 +217,7 @@ def _reject_ineligible(info: dict[str, Any]) -> None:
         fail("SOURCE_FORBIDDEN", "Restricted video.")
 
 
-def _ffmpeg_finish(payload: dict[str, Any], sources: list[Path], resolved: dict[str, Any] | None = None) -> None:
+def _ffmpeg_finish(payload: dict[str, Any], sources: list[Path], resolved: dict[str, Any] | None = None) -> dict[str, Any] | None:
     contract = dict(payload["contract"])
     output = Path(payload["output_path"])
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -186,12 +236,30 @@ def _ffmpeg_finish(payload: dict[str, Any], sources: list[Path], resolved: dict[
     audio_index = 0
     if single and resolved and resolved.get("audio") is not None:
         audio_index = int(resolved["audio"].get("audio_index") or 0)
+    from app.services.media_validate import probe as inspect_media, validate_output, duration_tolerance
+    inspected_durations = []
+    for source in sources:
+        fresh_duration = (inspect_media(settings, source).get("format") or {}).get("duration")
+        if fresh_duration not in (None, "N/A"):
+            inspected_durations.append(float(fresh_duration))
+    if inspected_durations:
+        fresh_duration = inspected_durations[0]
+        if contract.get("duration") and abs(fresh_duration - float(contract["duration"])) > duration_tolerance(float(contract["duration"])):
+            fail("FORMAT_CHANGED", "Source duration changed; analyze the link again.")
+        contract["duration"] = fresh_duration
     cmd = build_command(settings, contract, sources, output, progress)
     if single:
         _apply_audio_map(cmd, audio_index)
     code = _run_ffmpeg(cmd, progress, contract.get("duration"), int(payload.get("ffmpeg_timeout") or 1800), _phase_name(contract))
     if code != 0 or not output.exists() or output.stat().st_size <= 0:
         fail("POSTPROCESS_FAILED", "ffmpeg failed.", retryable=False)
+    emit({"type": "progress", "phase": "verifying", "component": "output", "downloaded_bytes": None,
+          "total_bytes": None, "total_is_estimate": False, "speed_bps": None, "eta_seconds": None, "percent": None})
+    checked = validate_output(settings, output, contract)
+    original_duration = payload["contract"].get("duration")
+    if original_duration and abs(checked["duration"] - float(original_duration)) > duration_tolerance(float(original_duration)):
+        fail("OUTPUT_INVALID", "Output duration does not match the selected contract.")
+    return checked
 
 
 def _apply_audio_map(cmd: list[str], audio_index: int) -> None:
@@ -222,78 +290,99 @@ def _phase_name(contract: dict[str, Any]) -> str:
 
 
 def _run_ffmpeg(cmd: list[str], progress: Path, duration: float | None, timeout: int, phase: str) -> int:
+    """Drain bounded pipes incrementally; no growing progress file or stderr log."""
+    import selectors
     import subprocess
+    from app.config import load_settings
 
-    err_path = progress.with_suffix(".err")
-    with err_path.open("wb") as err_handle:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err_handle)
-        started = time.monotonic()
-        while proc.poll() is None:
+    command = list(cmd)
+    command[command.index("-progress") + 1] = "pipe:1"
+    limit = max(1, min(load_settings().log_max_bytes, 256 * 1024))
+    tail = bytearray()
+    pending = b""
+    values = {}
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ, "progress")
+    selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+    started = time.monotonic()
+    try:
+        while selector.get_map():
             if time.monotonic() - started > timeout:
                 proc.kill()
                 proc.wait(timeout=5)
                 return 124
-            _emit_ffmpeg_progress(progress, duration, phase)
-            time.sleep(0.2)
-    return proc.returncode or 0
+            for key, _ in selector.select(timeout=0.2):
+                block = os.read(key.fileobj.fileno(), 8192)
+                if not block:
+                    selector.unregister(key.fileobj)
+                    continue
+                if key.data == "stderr":
+                    tail.extend(block)
+                    if len(tail) > limit:
+                        del tail[:-limit]
+                    continue
+                pending += block
+                while b"\n" in pending:
+                    raw, pending = pending.split(b"\n", 1)
+                    text = raw.decode("utf-8", errors="replace")
+                    if "=" in text:
+                        name, value = text.split("=", 1)
+                        values[name] = value
+                        if name == "progress":
+                            _emit_ffmpeg_values(values, duration, phase)
+                            values = {}
+                pending = pending[-8192:]
+        return proc.wait(timeout=5)
+    finally:
+        selector.close()
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        for handle in (proc.stdout, proc.stderr):
+            if handle:
+                handle.close()
+        progress.with_suffix(".err").write_bytes(tail)
+
+
+def _emit_ffmpeg_values(values: dict[str, str], duration: float | None, phase: str) -> None:
+    import math
+    elapsed = _clock_seconds(values.get("out_time", ""))
+    if elapsed is None:
+        try:
+            elapsed = max(0, int(values.get("out_time_us", ""))) / 1_000_000
+        except ValueError:
+            elapsed = None
+    speed = None
+    try:
+        measured = float(values.get("speed", "").rstrip("x"))
+        if math.isfinite(measured) and measured > 0:
+            speed = measured
+    except ValueError:
+        pass
+    percent = eta = None
+    if elapsed is not None and duration and duration > 0:
+        percent = max(0.0, min(100.0, elapsed / float(duration) * 100))
+        if speed is not None:
+            eta = max(0.0, float(duration) - elapsed) / speed
+    emit({"type": "progress", "phase": phase, "component": "output", "downloaded_bytes": None,
+          "total_bytes": None, "total_is_estimate": False, "speed_bps": None,
+          "processing_speed": speed, "eta_seconds": eta, "percent": percent})
 
 
 def _emit_ffmpeg_progress(progress: Path, duration: float | None, phase: str) -> None:
-    if not progress.exists():
-        return
-    elapsed = None
+    """Compatibility helper: inspect at most the last 8 KiB, never the full log."""
     try:
-        text = progress.read_text(encoding="utf-8", errors="replace")
+        with progress.open("rb") as handle:
+            handle.seek(max(0, progress.stat().st_size - 8192))
+            lines = handle.read(8192).decode("utf-8", errors="replace").splitlines()
     except OSError:
         return
-    for line in text.splitlines():
-        if line.startswith("out_time="):
-            elapsed = _clock_seconds(line.split("=", 1)[1])
-        elif line.startswith("out_time_us=") and elapsed is None:
-            try:
-                elapsed = int(line.split("=", 1)[1]) / 1_000_000
-            except ValueError:
-                elapsed = None
-        elif line.startswith("out_time_ms=") and elapsed is None:
-            # Some builds mislabel microseconds as milliseconds. Prefer out_time.
-            try:
-                raw = int(line.split("=", 1)[1])
-            except ValueError:
-                continue
-            as_ms = raw / 1000
-            as_us = raw / 1_000_000
-            elapsed = as_us if duration and as_ms > float(duration) * 2 else as_ms
-    if elapsed is None:
-        emit(
-            {
-                "type": "progress",
-                "phase": phase,
-                "downloaded_bytes": None,
-                "total_bytes": None,
-                "total_is_estimate": False,
-                "speed_bps": None,
-                "eta_seconds": None,
-                "percent": None,
-            }
-        )
-        return
-    percent = None
-    eta = None
-    if duration and duration > 0:
-        percent = max(0.0, min(99.0, elapsed / float(duration) * 100))
-        eta = max(0.0, float(duration) - elapsed)
-    emit(
-        {
-            "type": "progress",
-            "phase": phase,
-            "downloaded_bytes": None,
-            "total_bytes": None,
-            "total_is_estimate": False,
-            "speed_bps": None,
-            "eta_seconds": eta,
-            "percent": percent,
-        }
-    )
+    _emit_ffmpeg_values(dict(line.split("=", 1) for line in lines if "=" in line), duration, phase)
 
 
 def _clock_seconds(value: str) -> float | None:
@@ -423,12 +512,15 @@ def streams_from_file(path: Path, payload: dict[str, Any]) -> list[dict[str, Any
         video = videos[0]
         audio = audios[0]
         streams.append(_ff_stream("muxed", video, audio, 0))
+        streams[0].update(filesize=path.stat().st_size, physical_input_key="fixture-file")
         return streams
     for video in videos:
         streams.append(_ff_stream("video", video, None, None))
     for audio in audios:
         streams.append(_ff_stream("audio", None, audio, audio_i))
         audio_i += 1
+    for stream in streams:
+        stream.update(filesize=path.stat().st_size, physical_input_key="fixture-file")
     return streams
 
 
@@ -446,6 +538,7 @@ def _ff_stream(kind: str, video: dict | None, audio: dict | None, audio_index: i
         "width": (video or {}).get("width"),
         "height": (video or {}).get("height"),
         "fps": _fps(video),
+        "rotation": __import__("app.services.media_validate", fromlist=["media_rotation"]).media_rotation(video or {}),
         "pix_fmt": (video or {}).get("pix_fmt"),
         "bit_depth": _depth(video),
         "dynamic_range": "sdr",
@@ -455,6 +548,7 @@ def _ff_stream(kind: str, video: dict | None, audio: dict | None, audio_index: i
         "role": "default" if audio_index in {None, 0} else "alternate",
         "audio_index": audio_index if audio_index is not None else 0,
         "filesize": None,
+        "abr": (int((audio or {}).get("bit_rate") or 0) / 1000) or None,
         "ext": None,
         "format_id": f"{kind}-{audio_index or 0}",
     }
@@ -516,13 +610,13 @@ def ytdlp_probe(payload: dict[str, Any], *, download: bool) -> dict[str, Any]:
             info = ydl.extract_info(url, download=False)
     except DownloadError as exc:
         code, retryable = classify_message(str(exc))
-        fail(code, "The source could not be read.", retryable=retryable)
+        fail(code, "The source could not be read.", retryable=retryable, retry_after=_retry_after(exc) if code == "SOURCE_RATE_LIMITED" else None)
     if not info:
         fail("SOURCE_UNAVAILABLE", "No source information was returned.")
-    return sanitize_info(info, payload.get("video_id"))
+    return sanitize_info(info, payload.get("video_id"), include_download=payload.get("action") == "job")
 
 
-def sanitize_info(info: dict[str, Any], expected_id: str | None) -> dict[str, Any]:
+def sanitize_info(info: dict[str, Any], expected_id: str | None, *, include_download: bool = False) -> dict[str, Any]:
     video_id = info.get("id")
     if expected_id and video_id and video_id != expected_id:
         fail("SOURCE_UNAVAILABLE", "The extractor returned a different video.")
@@ -576,12 +670,26 @@ def sanitize_info(info: dict[str, Any], expected_id: str | None) -> dict[str, An
                 "language": fmt.get("language"),
                 "role": role,
                 "note": note,
-                "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
+                "filesize": fmt.get("filesize"),
+                "filesize_approx": fmt.get("filesize_approx"),
+                "size_provenance": "exact" if fmt.get("filesize") else ("approximate" if fmt.get("filesize_approx") else "unknown"),
+                "audio_track_id": (fmt.get("audio_track") or {}).get("id") if isinstance(fmt.get("audio_track"), dict) else fmt.get("audio_track_id"),
+                "rotation": fmt.get("rotation") or 0,
+                "tbr": fmt.get("tbr"),
+                "asr": fmt.get("asr"),
+                "audio_channels": fmt.get("audio_channels"),
+                "protocol": fmt.get("protocol"),
                 "abr": fmt.get("abr"),
                 "ext": fmt.get("ext"),
                 "audio_index": 0,
             }
         )
+        if include_download:
+            # Transient child-only source data. Never serialized into analysis,
+            # durable contracts, API responses or diagnostic messages.
+            download_info = {key: value for key, value in info.items() if key not in {"formats", "thumbnails", "requested_formats", "requested_downloads"}}
+            download_info.update(fmt)
+            streams[-1]["_download_info"] = download_info
     thumb = None
     for item in info.get("thumbnails") or []:
         candidate = item.get("url")
@@ -618,7 +726,7 @@ def ytdlp_playlist(payload: dict[str, Any], limit: int) -> dict[str, Any]:
             info = ydl.extract_info(payload["url"], download=False)
     except DownloadError as exc:
         code, retryable = classify_message(str(exc))
-        fail(code, "The playlist could not be read.", retryable=retryable)
+        fail(code, "The playlist could not be read.", retryable=retryable, retry_after=_retry_after(exc) if code == "SOURCE_RATE_LIMITED" else None)
     entries = []
     raw_entries = info.get("entries") if info else None
     if raw_entries is None:
@@ -644,68 +752,59 @@ def ytdlp_playlist(payload: dict[str, Any], limit: int) -> dict[str, Any]:
 
 
 def ytdlp_download(payload: dict[str, Any], work: Path, resolved: dict[str, Any]) -> list[Path]:
-    targets = []
-    video = resolved.get("video")
-    audio = resolved.get("audio")
-    if video and (resolved.get("muxed") or audio is None or audio is video):
-        targets.append(video)
-    else:
-        if video:
-            targets.append(video)
-        if audio:
-            targets.append(audio)
-    if not targets and audio:
-        targets.append(audio)
-    return [_download_one(payload, work, str(item.get("format_id") or "")) for item in targets]
+    targets = [s for s in (resolved.get("video"), resolved.get("audio")) if s is not None]
+    return [_download_one(payload, work, stream, index + 1, len(targets)) for index, stream in enumerate(targets)]
 
 
-def _download_one(payload: dict[str, Any], work: Path, format_id: str) -> Path:
+def _download_one(payload: dict[str, Any], work: Path, stream: dict[str, Any], component_index: int = 1, component_count: int = 1) -> Path:
     import re
-
     from yt_dlp import YoutubeDL
     from yt_dlp.utils import DownloadError
 
+    format_id = str(stream.get("format_id") or "")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", format_id):
         fail("FORMAT_UNAVAILABLE", "The resolved format id was rejected.")
+    if not stream.get("_download_info"):
+        fail("FORMAT_CHANGED", "Fresh source information is required.")
+    if payload.get("manage_slot"):
+        from app.config import load_settings
+        from app.db import connect
+        from app.services.analysis import assert_no_cooldown
+        conn = connect(load_settings())
+        try:
+            assert_no_cooldown(conn)
+        finally:
+            conn.close()
     opts = ytdlp_base(payload, download=True)
-    dest_tmpl = str(work / f"{format_id}.%(ext)s")
-    opts["format"] = format_id
-    opts["outtmpl"] = dest_tmpl
+    opts["outtmpl"] = str(work / f"{format_id}.%(ext)s")
     opts["overwrites"] = True
-    downloaded = {"bytes": 0}
+    component = "audio" if stream.get("kind") == "audio" else ("muxed" if stream.get("kind") == "muxed" else "video")
 
     def hook(event: dict[str, Any]) -> None:
-        if event.get("status") != "downloading":
+        if event.get("status") not in {"downloading", "finished"}:
             return
-        exact = event.get("total_bytes")
-        estimate = event.get("total_bytes_estimate")
+        exact, estimate = event.get("total_bytes"), event.get("total_bytes_estimate")
         got = event.get("downloaded_bytes") or 0
-        downloaded["bytes"] = got
-        total = exact or estimate
-        emit(
-            {
-                "type": "progress",
-                "phase": "downloading",
-                "downloaded_bytes": got,
-                "total_bytes": total,
-                "total_is_estimate": exact is None and estimate is not None,
-                "speed_bps": event.get("speed"),
-                "eta_seconds": event.get("eta"),
-                "percent": (got / exact * 100) if exact else None,
-            }
-        )
-
+        emit({"type": "progress", "phase": "downloading", "component": component,
+              "component_index": component_index, "component_count": component_count,
+              "downloaded_bytes": got, "total_bytes": exact if exact is not None else estimate,
+              "total_is_estimate": exact is None and estimate is not None,
+              "speed_bps": event.get("speed"), "eta_seconds": event.get("eta"),
+              "percent": (max(0, min(100, got / exact * 100))) if exact else None})
     opts["progress_hooks"] = [hook]
     try:
         with YoutubeDL(opts) as ydl:
-            ydl.download([payload["url"]])
+            # process_info downloads the just-resolved selected representation;
+            # download([url]) would perform a second unbounded extraction.
+            info = dict(stream["_download_info"])
+            target = Path(ydl.prepare_filename(info))
+            ydl.process_info(info)
     except DownloadError as exc:
         code, retryable = classify_message(str(exc))
-        fail(code, "The download failed.", retryable=retryable)
-    matches = list(work.glob(f"{format_id}.*"))
-    if not matches:
+        fail(code, "The download failed.", retryable=retryable, retry_after=_retry_after(exc) if code == "SOURCE_RATE_LIMITED" else None)
+    if not target.is_file() or target.suffix in {".part", ".ytdl"}:
         fail("ENGINE_ERROR", "The download finished without a file.", retryable=True)
-    return matches[0]
+    return target
 
 
 if __name__ == "__main__":

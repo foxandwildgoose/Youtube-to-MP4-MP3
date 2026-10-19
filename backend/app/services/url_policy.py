@@ -60,7 +60,13 @@ def parse_target(raw: str) -> ParsedTarget:
     if any(token in lowered for token in ("%25", "%2e", "%2f", "%5c", "%00")):
         raise _bad()
 
-    parts = urlsplit(raw)
+    try:
+        parts = urlsplit(raw)
+        # Accessors can also reject malformed bracketed authorities/ports.
+        parts.hostname
+        parts.port
+    except ValueError as exc:
+        raise _bad() from exc
     if parts.scheme.lower() not in {"http", "https"}:
         raise _bad()
     if parts.username or parts.password or "@" in raw.split("?", 1)[0]:
@@ -88,6 +94,8 @@ def parse_target(raw: str) -> ParsedTarget:
     if "//" in path or ".." in path:
         raise _bad()
     query = parse_qs(parts.query, keep_blank_values=False)
+    if any(len(query.get(key, [])) > 1 for key in ('v', 'list')):
+        raise _bad()
     ignored_timestamp = any(key in query for key in TIMESTAMP_KEYS)
     video = _first(query.get("v"))
     playlist = _first(query.get("list"))
@@ -108,18 +116,20 @@ def parse_target(raw: str) -> ParsedTarget:
 
     head = segments[0].lower()
     if head in {"playlist"}:
-        if not playlist:
+        if len(segments) != 1 or not playlist:
             raise _unsupported()
         return _playlist(playlist)
     if head in {"channel", "c", "user", "feed", "results", "hashtag", "premium"} or head.startswith("@"):
         raise _unsupported()
     if head in {"shorts", "embed", "v", "live", "e"}:
-        if len(segments) < 2 or not VIDEO_ID.match(segments[1]):
+        if len(segments) != 2 or not VIDEO_ID.match(segments[1]):
             raise _unsupported()
         if segments[1] in {"videoseries", "live_stream"}:
             raise _unsupported()
         return _video(segments[1], ignored_timestamp, playlist is not None)
     if head == "watch":
+        if len(segments) != 1:
+            raise _unsupported()
         if video:
             return _video(video, ignored_timestamp, playlist is not None)
         if playlist:

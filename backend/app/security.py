@@ -49,13 +49,15 @@ def operator_exists(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
-def set_password(conn: sqlite3.Connection, password: str) -> None:
+def set_password(conn: sqlite3.Connection, password: str, *, initial_only: bool = False) -> None:
     if len(password) < 10:
         raise AppError("BAD_REQUEST", 400, extra={"message": "Password must be at least 10 characters.", "action": "Choose a longer password."})
     now = utc_iso()
     digest = hash_password(password)
     with transaction(conn):
         if operator_exists(conn):
+            if initial_only:
+                raise AppError('ALREADY_BOOTSTRAPPED', 409)
             conn.execute(
                 "UPDATE operator SET password_hash = ?, updated_at = ? WHERE id = 1",
                 (digest, now),
@@ -91,10 +93,16 @@ def origin_allowed(settings: Settings, origin: str | None, host_header: str | No
         return False
     if not origin:
         return False
-    parts = urlsplit(origin)
+    try:
+        parts = urlsplit(origin)
+        parts.port
+    except ValueError:
+        return False
     if parts.scheme not in {"http", "https"}:
         return False
     if parts.username or parts.password:
+        return False
+    if parts.path or parts.query or parts.fragment:
         return False
     origin_host = parts.hostname or ""
     if origin_host.lower() not in settings.allowed_hosts:

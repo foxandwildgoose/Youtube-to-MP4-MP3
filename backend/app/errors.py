@@ -28,6 +28,18 @@ class AppError(Exception):
 
 
 MESSAGES: dict[str, dict[str, tuple[str, str]]] = {
+    "HISTORY_ACTIVE": {
+        "ko": ("진행 중인 작업의 기록은 지울 수 없습니다.", "먼저 취소하고 작업이 멈춘 뒤 기록을 지우세요."),
+        "en": ("Active job history cannot be removed.", "Cancel the job and wait until it stops before removing history."),
+    },
+    "RETRY_NOT_ALLOWED": {
+        "ko": ("이 상태에서는 다시 시도할 수 없습니다.", "실패하거나 취소된 작업만 다시 시도할 수 있습니다. 새 파일은 새 작업으로 만드세요."),
+        "en": ("This job cannot be retried in its current state.", "Retry a failed or cancelled job; use a new creation for another file."),
+    },
+    "FILE_BUSY": {
+        "ko": ("파일을 전송 중입니다.", "전송이 끝난 뒤 삭제하거나 보관 상태를 바꾸세요."),
+        "en": ("The file is being transferred.", "Wait for the transfer to finish before deleting or changing retention."),
+    },
     "INVALID_URL": {
         "ko": ("주소 형식이 올바르지 않습니다.", "YouTube 영상 주소를 다시 붙여 넣으세요."),
         "en": ("That address is not a valid URL.", "Paste a YouTube video URL."),

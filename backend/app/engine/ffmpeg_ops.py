@@ -20,7 +20,10 @@ def _even_box(width: int, height: int, cap: int) -> tuple[int, int]:
 def language_args(language: str | None) -> list[str]:
     if not language:
         return []
-    return ["-metadata:s:a:0", f"language={language}"]
+    # MP4 language fields require ISO 639-2, not two-letter UI locales.
+    base = language.lower().replace("_", "-").split("-", 1)[0]
+    iso3 = {"ko": "kor", "en": "eng", "ja": "jpn", "zh": "zho", "es": "spa", "fr": "fra", "de": "deu"}.get(base, base)
+    return ["-metadata:s:a:0", f"language={iso3}"]
 
 
 def build_command(
@@ -53,7 +56,9 @@ def build_command(
         cmd.extend(
             [
                 "-vf",
-                f"scale={width}:{height}:flags=lanczos",
+                f"scale={width}:{height}:flags=lanczos,setsar=1",
+                "-fps_mode",
+                "passthrough",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -68,7 +73,7 @@ def build_command(
         )
         if contract.get("has_audio"):
             cmd.extend(["-c:a", "aac", "-b:a", "160k"])
-        cmd.extend(["-movflags", "+faststart"])
+        cmd.extend(["-metadata:s:v:0", "rotate=0", "-movflags", "+faststart"])
     elif kind == "mp3":
         rate = int(contract.get("mp3_bitrate") or 192)
         cmd.extend(["-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-b:a", f"{rate}k"])
@@ -82,18 +87,35 @@ def build_command(
 
 
 def run_ffmpeg(cmd: list[str], timeout: int) -> int:
+    """Standalone runner with a bounded stderr tail and guaranteed reap."""
+    import selectors
+    import os
+    import time
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stderr, selectors.EVENT_READ)
+    tail = b""
+    deadline = time.monotonic() + timeout
     try:
-        _, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        return 124
-    # Keep a bounded diagnostic on the process object via return only.
-    if stderr:
-        tail = stderr[-4000:]
-        run_ffmpeg.last_stderr = tail.decode("utf-8", errors="replace")  # type: ignore[attr-defined]
-    return proc.returncode
+        while selector.get_map():
+            if time.monotonic() > deadline:
+                proc.kill()
+                proc.wait(timeout=5)
+                return 124
+            for key, _ in selector.select(timeout=0.2):
+                data = os.read(key.fileobj.fileno(), 8192)
+                if not data:
+                    selector.unregister(key.fileobj)
+                tail = (tail + data)[-4000:]
+        return proc.wait(timeout=5)
+    finally:
+        selector.close()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        if proc.stderr:
+            proc.stderr.close()
+        run_ffmpeg.last_stderr = tail.decode("utf-8", errors="replace")
 
 
-run_ffmpeg.last_stderr = ""  # type: ignore[attr-defined]
+run_ffmpeg.last_stderr = ""

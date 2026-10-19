@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,16 +17,17 @@ from app.main import create_app
 from app.worker import claim_next, process_job
 
 URL = os.environ.get("LIVE_TEST_URL", "").strip()
-FFMPEG = "/usr/local/bin/ffmpeg"
-FFPROBE = "/workspace/bin/ffprobe"
-DENO = "/workspace/bin/deno"
+FFMPEG = os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg") or "ffmpeg"
+FFPROBE = os.environ.get("FFPROBE_PATH") or shutil.which("ffprobe") or "ffprobe"
+DENO = os.environ.get("DENO_PATH") or shutil.which("deno") or "deno"
 
 
 @pytest.mark.skipif(
     not URL,
     reason="T16 skipped on 2026-10-18: LIVE_TEST_URL was not provided. Local fixtures do not prove YouTube availability.",
 )
-def test_live_source_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("kind", ["mp4", "mp3"])
+def test_live_source_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str):
     from fastapi.testclient import TestClient
 
     from tests.conftest import Api
@@ -48,9 +50,7 @@ def test_live_source_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         analyzed = client.post("/api/v1/analyses", json={"url": URL}, headers=api.headers())
         assert analyzed.status_code == 200, analyzed.text
         analysis = analyzed.json()
-        created = api.create(analysis, kind="original_audio", key="live-smoke-001")
-        if created.status_code != 202:
-            created = api.create(analysis, kind="mp3", key="live-smoke-002")
+        created = api.create(analysis, kind=kind, key=f"live-smoke-{kind}")
         assert created.status_code == 202, created.text
         job_id = created.json()["id"]
         assert claim_next(settings, "live-smoke") == job_id

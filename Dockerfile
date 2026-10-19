@@ -1,50 +1,66 @@
-# Local reference image. Do not auto-update yt-dlp in a running container.
-# Rebuild, retest, and keep the previous tag when upgrading yt-dlp and yt-dlp-ejs together.
-
+# syntax=docker/dockerfile:1
+# Native linux/amd64 only. ARM hosts must explicitly select amd64 emulation.
+# Rebuild and rerun fixture gates when upgrading yt-dlp/EJS/verified Deno together.
 FROM node:22-bookworm-slim AS ui
 WORKDIR /src
 COPY package.json package-lock.json ./
-RUN npm ci
-COPY frontend ./frontend
-COPY src/styles.css ./src/styles.css
-COPY src/features/downloads ./src/features/downloads
-RUN npx vite build --config frontend/vite.config.ts
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -f /run/secrets/proxy_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/proxy_ca; fi; \
+    npm install --global --strict-ssl=true npm@11.9.0 && npm ci --strict-ssl=true
+# One source-copy layer also keeps Docker's vfs storage bounded in cloud builds.
+COPY . .
+RUN npm run build:spa
 
-FROM python:3.12-slim-bookworm AS runtime
-ARG DENO_VERSION=2.9.7
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg unzip \
-  && rm -rf /var/lib/apt/lists/* \
-  && ffmpeg -hide_banner -encoders | grep -q libx264 \
-  && ffmpeg -hide_banner -encoders | grep -q aac \
-  && ffmpeg -hide_banner -encoders | grep -q libmp3lame \
-  && mkdir -p /opt/seorap/bin \
-  && curl -fsSL -o /tmp/deno.zip "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
-  && unzip -q /tmp/deno.zip -d /opt/seorap/bin \
-  && chmod 755 /opt/seorap/bin/deno \
-  && rm /tmp/deno.zip \
-  && useradd --uid 10001 --home-dir /opt/seorap --shell /usr/sbin/nologin seorap
-
+FROM python:3.12-slim-bookworm AS base
+ARG TARGETARCH
 WORKDIR /opt/seorap
 COPY backend/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt \
-  && pip install --no-cache-dir "yt-dlp-ejs==0.8.0"
-COPY backend /opt/seorap
-COPY --from=ui /src/backend/app/static /opt/seorap/app/static
-RUN mkdir -p /data/state /data/tmp /data/files /data/logs \
-  && chown -R 10001:10001 /opt/seorap /data
-
+COPY scripts/install-deno.sh scripts/init-volume.sh /opt/seorap/
+RUN --mount=type=secret,id=proxy_bundle \
+    set -eu; \
+    test "$TARGETARCH" = amd64 || { echo 'Only linux/amd64 is supported; select --platform linux/amd64.' >&2; exit 2; }; \
+    if [ -f /run/secrets/proxy_bundle ]; then export CURL_CA_BUNDLE=/run/secrets/proxy_bundle PIP_CERT=/run/secrets/proxy_bundle; fi; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && ffmpeg -hide_banner -encoders | grep -q libx264 \
+    && ffmpeg -hide_banner -encoders | grep -q aac \
+    && ffmpeg -hide_banner -encoders | grep -q libmp3lame \
+    && sh /opt/seorap/install-deno.sh /opt/seorap/bin \
+    && rm /opt/seorap/install-deno.sh \
+    && pip install --no-cache-dir -r /tmp/requirements.txt \
+    && useradd --uid 10001 --home-dir /opt/seorap --shell /usr/sbin/nologin seorap \
+    && install -d -o 10001 -g 10001 /data /data/state /data/tmp /data/files /data/logs
 ENV PYTHONUNBUFFERED=1 \
-  PYTHONDONTWRITEBYTECODE=1 \
-  PYTHONPATH=/opt/seorap \
-  DATA_DIR=/data \
-  PATH="/opt/seorap/bin:${PATH}" \
-  FFMPEG_PATH=/usr/bin/ffmpeg \
-  FFPROBE_PATH=/usr/bin/ffprobe \
-  DENO_PATH=/opt/seorap/bin/deno \
-  LOCAL_HTTP=1 \
-  MEDIA_ADAPTER=ytdlp
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/seorap \
+    DATA_DIR=/data \
+    PATH="/opt/seorap/bin:${PATH}" \
+    FFMPEG_PATH=/usr/bin/ffmpeg \
+    FFPROBE_PATH=/usr/bin/ffprobe \
+    DENO_PATH=/opt/seorap/bin/deno \
+    DENO_DIR=/tmp/deno-cache \
+    XDG_CACHE_HOME=/tmp/cache \
+    LOCAL_HTTP=1 \
+    REQUIRE_PASSWORD=1 \
+    ALLOW_HTTP_BOOTSTRAP=0 \
+    MEDIA_ADAPTER=ytdlp
 
+# Test dependencies/fixtures never enter the production image.
+FROM base AS test
+COPY --chown=10001:10001 backend /opt/seorap
+RUN --mount=type=secret,id=proxy_bundle \
+    if [ -f /run/secrets/proxy_bundle ]; then export PIP_CERT=/run/secrets/proxy_bundle; fi; \
+    pip install --no-cache-dir -r /opt/seorap/requirements-test.txt
+USER 10001:10001
+ENV DATA_DIR=/tmp/seorap-test-state
+CMD ["python", "-m", "pytest", "-ra", "-p", "no:cacheprovider"]
+
+FROM base AS runtime
+# Explicit ownership also supports source checkouts created with umask 077.
+COPY --chown=10001:10001 backend/app /opt/seorap/app
+COPY --from=ui --chown=10001:10001 /src/backend/app/static /opt/seorap/app/static
 USER 10001:10001
 EXPOSE 8000
 STOPSIGNAL SIGTERM

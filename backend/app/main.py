@@ -6,6 +6,7 @@ import hashlib
 import json
 import mimetypes
 import secrets
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -14,12 +15,16 @@ from urllib.parse import quote
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from app.config import Settings, load_settings, validate_limits
 from app.db import connect, init_db, utc_iso, utc_now
 from app.diagnostics import diagnostics
 from app.errors import AppError, envelope, localize
+from app.request_limits import RequestBodyLimit
+from app.public_models import PublicAnalysis, PublicJob, PublicJobPage, PublicSession, PublicReadiness, PublicSettings, PublicPlaylist
 from app.schemas import JobCreateBody, PasswordBody, RetentionBody, SettingsPatch, UrlBody
 from app.security import (
     cookie_kwargs,
@@ -38,7 +43,7 @@ from app.security import (
 from app.services.analysis import analyze_playlist, analyze_video, load_analysis
 from app.services.jobs import create_job, delete_file, delete_history, list_jobs, request_cancel, set_retention, snapshot
 from app.services.safe_http import fetch_thumbnail
-from app.services.storage import assert_contained, ensure_dirs
+from app.services.storage import ensure_dirs
 
 CSP = (
     "default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self'; "
@@ -51,22 +56,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     validate_limits(settings)
     ensure_dirs(settings)
-    init_db(settings)
-    app = FastAPI(title="Seorap", version="1.0.0", openapi_url="/api/v1/openapi.json", docs_url="/api/v1/docs")
+    init_db(settings).close()
+    @asynccontextmanager
+    async def lifespan(_app):
+        try:
+            yield
+        finally:
+            from app.engine_runner import stop_owned_engines
+            stop_owned_engines()
+
+    app = FastAPI(title="Seorap", version="1.0.0", openapi_url="/api/v1/openapi.json", docs_url="/api/v1/docs", lifespan=lifespan)
     app.state.settings = settings
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
-        length = request.headers.get("content-length")
-        if request.url.path.startswith("/api") and length and int(length) > 65536:
-            return JSONResponse(status_code=413, content=envelope(AppError("LIMIT_EXCEEDED", 413), _locale(request)))
+        if request.url.path in {'/', '/index.html'}:
+            request.state.style_nonce = secrets.token_urlsafe(18)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         if request.url.path in {"/", "/index.html"}:
-            response.headers["Content-Security-Policy"] = CSP
+            response.headers["Content-Security-Policy"] = CSP.replace("style-src 'self'", f"style-src 'self' 'nonce-{request.state.style_nonce}'")
         if request.url.path.startswith("/api"):
             response.headers["Cache-Control"] = "no-store"
         return response
@@ -140,11 +152,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise AppError("CSRF_FAILED", 403)
         if operator_exists(conn):
             raise AppError("ALREADY_BOOTSTRAPPED", 409)
-        set_password(conn, body.password)
+        set_password(conn, body.password, initial_only=True)
         ensure_preferences(conn)
         return {"bootstrapped": True}
 
-    @app.post("/api/v1/auth/login")
+    @app.post("/api/v1/auth/login", response_model=PublicSession)
     def login(body: PasswordBody, request: Request, conn=Depends(db)):
         _guard_entry(request, settings)
         if not operator_exists(conn):
@@ -171,7 +183,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.delete_cookie(settings.cookie_name, path="/")
         return response
 
-    @app.get("/api/v1/auth/session")
+    @app.get("/api/v1/auth/session", response_model=PublicSession)
     def session_route(request: Request, conn=Depends(db)):
         if not host_allowed(settings, request.headers.get("host")):
             raise AppError("CSRF_FAILED", 403)
@@ -184,11 +196,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             response.set_cookie(settings.cookie_name, token, **cookie_kwargs(settings))
             return response
         if row is None:
-            return {"authenticated": False, "bootstrapped": operator_exists(conn), "password_required": True}
+            return {
+                "authenticated": False, "bootstrapped": operator_exists(conn), "password_required": True,
+                "bootstrap_allowed": settings.allow_http_bootstrap and (request.client.host if request.client else '') in {'127.0.0.1', '::1', 'testclient'},
+                "bootstrap_method": 'browser' if settings.allow_http_bootstrap else 'cli',
+            }
         touch_session(conn, row["id"])
         return session_payload(conn, settings, token)
 
-    @app.post("/api/v1/analyses")
+    @app.post("/api/v1/analyses", response_model=PublicAnalysis)
     def analyses(body: UrlBody, session=Depends(require_csrf)):
         return analyze_video(settings, body.url)
 
@@ -206,11 +222,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         data, ctype = fetch_thumbnail(url)
         return Response(content=data, media_type=ctype)
 
-    @app.post("/api/v1/playlists/analyze")
+    @app.post("/api/v1/playlists/analyze", response_model=PublicPlaylist)
     def playlists(body: UrlBody, session=Depends(require_csrf)):
         return analyze_playlist(settings, body.url)
 
-    @app.post("/api/v1/jobs", status_code=202)
+    @app.post("/api/v1/jobs", status_code=202, response_model=PublicJob)
     def jobs_create(
         body: JobCreateBody,
         request: Request,
@@ -230,12 +246,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             idempotency_key=key,
             request_hash=digest,
         )
-        return JSONResponse(status_code=202, content=present_job(snap, _locale(request, settings, conn)))
+        return present_job(snap, _locale(request, settings, conn))
 
-    @app.get("/api/v1/jobs")
+    @app.get("/api/v1/jobs", response_model=PublicJobPage)
     def jobs_list(
         request: Request,
         status: str | None = None,
+        search: str | None = None,
+        format: str | None = None,
+        active: bool | None = None,
+        file_state: str | None = None,
         limit: int = 20,
         offset: int = 0,
         session=Depends(require_session),
@@ -245,12 +265,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise AppError("BAD_REQUEST", 400)
         limit = max(1, min(limit, 100))
         offset = max(0, offset)
-        payload = list_jobs(conn, status=status, limit=limit, offset=offset)
+        if format and format not in {'mp4', 'mp3', 'original_audio'}:
+            raise AppError('BAD_REQUEST', 400)
+        if file_state and file_state not in {'none', 'available', 'expired', 'deleted', 'missing'}:
+            raise AppError('BAD_REQUEST', 400)
+        payload = list_jobs(conn, status=status, limit=limit, offset=offset, search=search, format=format, active=active, file_state=file_state)
         locale = _locale(request, settings, conn)
         payload["jobs"] = [present_job(job, locale) for job in payload["jobs"]]
         return payload
 
-    @app.get("/api/v1/jobs/{job_id}")
+    @app.get("/api/v1/jobs/{job_id}", response_model=PublicJob)
     def jobs_get(job_id: str, request: Request, session=Depends(require_session), conn=Depends(db)):
         return present_job(snapshot(conn, job_id), _locale(request, settings, conn))
 
@@ -293,11 +317,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
         )
 
-    @app.post("/api/v1/jobs/{job_id}/cancel")
+    @app.post("/api/v1/jobs/{job_id}/cancel", response_model=PublicJob)
     def jobs_cancel(job_id: str, request: Request, session=Depends(require_csrf), conn=Depends(db)):
         return present_job(request_cancel(conn, job_id), _locale(request, settings, conn))
 
-    @app.post("/api/v1/jobs/{job_id}/retry", status_code=202)
+    @app.post("/api/v1/jobs/{job_id}/retry", status_code=202, response_model=PublicJob)
     def jobs_retry(
         job_id: str,
         body: JobCreateBody,
@@ -319,17 +343,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request_hash=digest,
             parent_job_id=job_id,
         )
-        return JSONResponse(status_code=202, content=present_job(snap, _locale(request, settings, conn)))
+        return present_job(snap, _locale(request, settings, conn))
 
     @app.api_route("/api/v1/jobs/{job_id}/file", methods=["GET", "HEAD"])
     def jobs_file(job_id: str, request: Request, session=Depends(require_session), conn=Depends(db)):
         return file_response(settings, conn, job_id, request)
 
-    @app.patch("/api/v1/jobs/{job_id}/retention")
+    @app.patch("/api/v1/jobs/{job_id}/retention", response_model=PublicJob)
     def jobs_retention(job_id: str, body: RetentionBody, request: Request, session=Depends(require_csrf), conn=Depends(db)):
         return present_job(set_retention(conn, settings, job_id, body.keep_on_server), _locale(request, settings, conn))
 
-    @app.delete("/api/v1/jobs/{job_id}/file")
+    @app.delete("/api/v1/jobs/{job_id}/file", response_model=PublicJob)
     def jobs_delete_file(job_id: str, request: Request, session=Depends(require_csrf), conn=Depends(db)):
         return present_job(delete_file(conn, settings, job_id), _locale(request, settings, conn))
 
@@ -338,7 +362,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         delete_history(conn, job_id)
         return Response(status_code=204)
 
-    @app.get("/api/v1/settings")
+    @app.get("/api/v1/settings", response_model=PublicSettings)
     def settings_get(session=Depends(require_session), conn=Depends(db)):
         ensure_preferences(conn)
         row = conn.execute("SELECT language, theme, mp3_bitrate FROM preferences WHERE id = 1").fetchone()
@@ -362,7 +386,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         }
 
-    @app.patch("/api/v1/settings")
+    @app.patch("/api/v1/settings", response_model=PublicSettings)
     def settings_patch(body: SettingsPatch, session=Depends(require_csrf), conn=Depends(db)):
         ensure_preferences(conn)
         current = conn.execute("SELECT language, theme, mp3_bitrate FROM preferences WHERE id = 1").fetchone()
@@ -379,11 +403,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def diagnostics_route(session=Depends(require_session), conn=Depends(db)):
         return diagnostics(settings, conn)
 
+    @app.get('/api/v1/readiness', response_model=PublicReadiness)
+    def processing_readiness(session=Depends(require_session), conn=Depends(db)):
+        info = diagnostics(settings, conn)
+        worker_ready = bool(info.get('worker') and not info['worker']['stale'])
+        dependencies_ready = bool(info.get('dependencies_ready'))
+        reasons = []
+        if not worker_ready:
+            reasons.append('WORKER_UNAVAILABLE')
+        if not dependencies_ready:
+            reasons.append('DEPENDENCY_MISSING')
+        if info['free_bytes'] < settings.min_free_bytes:
+            reasons.append('STORAGE_FULL')
+        return {'processing_ready': bool(info['ready']), 'worker_ready': worker_ready, 'dependencies_ready': bool(dependencies_ready), 'reasons': reasons}
+
     static_dir = Path(__file__).resolve().parent / "static"
     index = static_dir / "index.html"
     if index.exists():
+        @app.get('/', include_in_schema=False)
+        @app.get('/index.html', include_in_schema=False)
+        def spa_index(request: Request):
+            return HTMLResponse(render_spa_index(index.read_text(encoding='utf-8'), request.state.style_nonce), headers={'Cache-Control': 'no-store'})
+
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="spa")
+    app.add_middleware(RequestBodyLimit)
     return app
+
+
+def render_spa_index(document: str, nonce: str) -> str:
+    # Trusted code reads this nonce before Radix inserts its scroll-lock styles.
+    return document.replace('<head>', f'<head><meta name="csp-style-nonce" content="{nonce}">', 1)
 
 
 def _locale(request: Request, settings: Settings | None = None, conn=None) -> str:
@@ -424,7 +473,7 @@ def _hash_body(body: JobCreateBody, parent: str | None) -> str:
 def session_payload(conn, settings: Settings, token: str | None) -> dict[str, Any]:
     row = session_from_token(conn, token)
     if row is None:
-        return {"authenticated": False, "bootstrapped": operator_exists(conn)}
+        return {"authenticated": False, "bootstrapped": operator_exists(conn), "bootstrap_allowed": settings.allow_http_bootstrap, "bootstrap_method": 'browser' if settings.allow_http_bootstrap else 'cli'}
     prefs = conn.execute("SELECT language, theme FROM preferences WHERE id = 1").fetchone()
     return {
         "authenticated": True,
@@ -434,6 +483,8 @@ def session_payload(conn, settings: Settings, token: str | None) -> dict[str, An
         "language": prefs["language"] if prefs else "ko",
         "theme": prefs["theme"] if prefs else "system",
         "password_required": settings.require_password,
+        "bootstrap_allowed": False,
+        "bootstrap_method": None,
     }
 
 
@@ -450,80 +501,77 @@ def present_job(snap: dict[str, Any], locale: str) -> dict[str, Any]:
 
 
 def file_response(settings: Settings, conn, job_id: str, request: Request) -> Response:
-    row = conn.execute("SELECT file_state, artifact_json FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    if row is None:
-        raise AppError("NOT_FOUND", 404)
-    if row["file_state"] in {"expired", "deleted"}:
-        raise AppError("FILE_EXPIRED", 410)
-    if row["file_state"] != "available" or not row["artifact_json"]:
-        raise AppError("FILE_MISSING", 404)
-    artifact = json.loads(row["artifact_json"])
-    path = (settings.data_dir / artifact["relative_path"]).resolve()
-    try:
-        assert_contained(settings.data_dir, path)
-    except AppError:
-        raise AppError("FILE_MISSING", 404) from None
-    if path.is_symlink() or not path.is_file():
-        conn.execute(
-            "UPDATE jobs SET file_state = 'missing', revision = revision + 1, updated_at = ? WHERE id = ?",
-            (utc_iso(), job_id),
-        )
-        raise AppError("FILE_MISSING", 410)
-    size = path.stat().st_size
+    from app.services.storage import open_artifact, release_lease, renew_lease
+    opened = open_artifact(conn, settings, job_id)
+    artifact, size = opened.artifact, opened.size
     filename = artifact.get("filename") or "download"
     mime = artifact.get("mime") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    disposition = f"attachment; filename=\"download{Path(filename).suffix}\"; filename*=UTF-8''{quote(filename)}"
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Disposition": disposition,
-        "Cache-Control": "no-store",
-        "X-Content-Type-Options": "nosniff",
-    }
+    disposition = f"attachment; filename=\"download{Path(filename).suffix}\"; filename*=UTF-8''{quote(filename, safe='')}"
+    headers = {"Accept-Ranges": "bytes", "Content-Disposition": disposition,
+               "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+    closed = False
+
+    def cleanup():
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        opened.handle.close()
+        closer = connect(settings)
+        try:
+            release_lease(closer, opened.lease_id)
+        finally:
+            closer.close()
+
     try:
         byte_range = _parse_range(request.headers.get("range"), size)
     except AppError:
-        return Response(
-            status_code=416,
-            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes", "Content-Disposition": disposition},
-            media_type=mime,
-        )
-    if request.method == "HEAD":
-        headers["Content-Length"] = str(size if byte_range is None else byte_range[1] - byte_range[0] + 1)
-        if byte_range:
-            headers["Content-Range"] = f"bytes {byte_range[0]}-{byte_range[1]}/{size}"
-            return Response(status_code=206, headers=headers, media_type=mime)
-        return Response(status_code=200, headers=headers, media_type=mime)
+        cleanup()
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"}, media_type=mime)
     start, end = (0, size - 1) if byte_range is None else byte_range
     length = end - start + 1
     status = 200 if byte_range is None else 206
+    headers["Content-Length"] = str(length)
     if byte_range:
         headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-    headers["Content-Length"] = str(length)
-    lease = secrets.token_hex(8)
-    conn.execute(
-        "INSERT INTO transfer_leases (id, job_id, expires_at) VALUES (?, ?, ?)",
-        (lease, job_id, utc_iso(utc_now() + timedelta(minutes=10))),
-    )
+    if request.method == "HEAD":
+        cleanup()
+        return Response(status_code=status, headers=headers, media_type=mime)
 
-    def chunks():
+    async def chunks():
+        import asyncio
+        import contextlib
+
+        async def renew():
+            while True:
+                await asyncio.sleep(30)
+                renewal = connect(settings)
+                try:
+                    if not renew_lease(renewal, opened.lease_id):
+                        raise OSError('Transfer lease lost')
+                finally:
+                    renewal.close()
+
+        renewal_task = asyncio.create_task(renew())
         try:
-            with path.open("rb") as handle:
-                handle.seek(start)
-                remaining = length
-                while remaining > 0:
-                    piece = handle.read(min(64 * 1024, remaining))
-                    if not piece:
-                        break
-                    remaining -= len(piece)
-                    yield piece
+            opened.handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                # A fixed chunk keeps memory bounded, even for multi-GiB media.
+                piece = await asyncio.to_thread(opened.handle.read, min(64 * 1024, remaining))
+                if not piece:
+                    raise OSError('Artifact changed during transfer')
+                if renewal_task.done():
+                    renewal_task.result()
+                remaining -= len(piece)
+                yield piece
         finally:
-            closer = connect(settings)
-            try:
-                closer.execute("DELETE FROM transfer_leases WHERE id = ?", (lease,))
-            finally:
-                closer.close()
+            renewal_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, OSError):
+                await renewal_task
+            cleanup()
 
-    return StreamingResponse(chunks(), status_code=status, media_type=mime, headers=headers)
+    return StreamingResponse(chunks(), status_code=status, media_type=mime, headers=headers, background=BackgroundTask(cleanup))
 
 
 def _parse_range(header: str | None, size: int) -> tuple[int, int] | None:

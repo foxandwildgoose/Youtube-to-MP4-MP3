@@ -1,0 +1,43 @@
+# Explicit test-only deployment. Its project name and volume are isolated from personal data.
+# Generate synthetic media first with scripts/create-fixtures.py. Never use live URLs.
+name: seorap-fixture
+
+services:
+  app:
+    ports: !override
+      - "127.0.0.1:18000:8000"
+    environment:
+      MEDIA_ADAPTER: fixture
+      ALLOW_FIXTURE_URLS: "1"
+      ALLOW_TEST_HOOKS: "1"
+      FIXTURE_CATALOG: /fixtures/catalog.json
+      REQUIRE_PASSWORD: "1"
+      ALLOW_HTTP_BOOTSTRAP: "0"
+      ENABLE_PLAYLISTS: "1"
+      ENABLE_TRANSCODING: "1"
+      # Explicit tiny synthetic test budgets; personal deployment keeps production defaults.
+      MAX_INPUT_BYTES: "67108864"
+      MAX_OUTPUT_BYTES: "67108864"
+      MAX_WORKSPACE_BYTES: "134217728"
+      MAX_STORAGE_BYTES: "2147483648"
+      MIN_FREE_BYTES: "0"
+    volumes:
+      - ${SEORAP_FIXTURE_DIR:?Set SEORAP_FIXTURE_DIR to generated synthetic fixtures}:/fixtures:ro
+  worker:
+    environment:
+      MEDIA_ADAPTER: fixture
+      ALLOW_FIXTURE_URLS: "1"
+      ALLOW_TEST_HOOKS: "1"
+      FIXTURE_CATALOG: /fixtures/catalog.json
+      REQUIRE_PASSWORD: "1"
+      ALLOW_HTTP_BOOTSTRAP: "0"
+      ENABLE_PLAYLISTS: "1"
+      ENABLE_TRANSCODING: "1"
+      # Explicit tiny synthetic test budgets; personal deployment keeps production defaults.
+      MAX_INPUT_BYTES: "67108864"
+      MAX_OUTPUT_BYTES: "67108864"
+      MAX_WORKSPACE_BYTES: "134217728"
+      MAX_STORAGE_BYTES: "2147483648"
+      MIN_FREE_BYTES: "0"
+    volumes:
+      - ${SEORAP_FIXTURE_DIR:?Set SEORAP_FIXTURE_DIR to generated synthetic fixtures}:/fixtures:ro

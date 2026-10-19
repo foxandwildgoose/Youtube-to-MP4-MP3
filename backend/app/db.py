@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import secrets
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,25 +53,47 @@ def migrate(conn: sqlite3.Connection) -> None:
         if version in applied:
             continue
         script = path.read_text(encoding="utf-8")
-        conn.executescript(script)
-        conn.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-            (version, utc_iso()),
-        )
+        # executescript commits an existing transaction before running. Split only
+        # complete SQL statements instead, so DDL and its marker roll back together.
+        with transaction(conn):
+            if conn.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (version,)).fetchone():
+                continue
+            statement = ""
+            for line in script.splitlines(keepends=True):
+                statement += line
+                if sqlite3.complete_statement(statement):
+                    conn.execute(statement)
+                    statement = ""
+            if statement.strip():
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (version, utc_iso()),
+            )
 
 
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
-    conn.execute("BEGIN IMMEDIATE")
+    nested = conn.in_transaction
+    savepoint = "nested_" + secrets.token_hex(8)
+    conn.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE")
     try:
         yield conn
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}" if nested else "COMMIT")
+    except BaseException:
+        if nested:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        elif conn.in_transaction:
+            conn.execute("ROLLBACK")
         raise
 
 
 def init_db(settings: Settings) -> sqlite3.Connection:
     conn = connect(settings)
-    migrate(conn)
+    try:
+        migrate(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn

@@ -41,7 +41,7 @@ def set_cooldown(conn: sqlite3.Connection, seconds: int, reason: str) -> None:
     conn.execute(
         """
         INSERT INTO provider_cooldown (provider, until_at, reason) VALUES ('youtube', ?, ?)
-        ON CONFLICT(provider) DO UPDATE SET until_at = excluded.until_at, reason = excluded.reason
+        ON CONFLICT(provider) DO UPDATE SET until_at = MAX(provider_cooldown.until_at, excluded.until_at), reason = excluded.reason
         """,
         (until, reason[:200]),
     )
@@ -62,7 +62,14 @@ def analyze_video(settings: Settings, url: str) -> dict[str, Any]:
         release_slot(settings, slot_id)
     info = _outcome_info(settings, outcome)
     _reject_source(settings, info)
-    planned = plan_outputs(info.get("streams") or [], info.get("duration"), settings)
+    # Saved operator preference governs future analyses, never queued contracts.
+    conn = connect(settings)
+    try:
+        preference = conn.execute("SELECT mp3_bitrate FROM preferences WHERE id = 1").fetchone()
+        effective_rate = int(preference["mp3_bitrate"]) if preference else settings.mp3_default_kbps
+    finally:
+        conn.close()
+    planned = plan_outputs(info.get("streams") or [], info.get("duration"), settings, mp3_default_kbps=effective_rate)
     analysis_id = secrets.token_hex(16)
     choices = []
     for choice in planned["choices"]:
@@ -79,6 +86,7 @@ def analyze_video(settings: Settings, url: str) -> dict[str, Any]:
         "ignored_timestamp": target.ignored_timestamp,
         "ignored_playlist": target.ignored_playlist,
         "live_status": info.get("live_status"),
+        "effective_mp3_bitrate": planned["effective_mp3_bitrate"],
     }
     conn = connect(settings)
     try:
@@ -171,6 +179,15 @@ def public_choice(choice_id: str, contract: dict[str, Any]) -> dict[str, Any]:
         "portrait": contract.get("portrait"),
         "bitrate_kbps": contract.get("mp3_bitrate"),
         "is_default": bool(contract.get("is_default")),
+        "track_key": contract.get("audio_track_key"),
+        "encoded_width": contract.get("output_encoded_width"),
+        "encoded_height": contract.get("output_encoded_height"),
+        "rotation": contract.get("output_rotation", 0),
+        "input_bytes": contract.get("input_bytes"),
+        "input_size_provenance": contract.get("input_size_provenance", "unknown"),
+        "estimated_output_bytes": contract.get("estimated_output_bytes"),
+        "output_size_provenance": contract.get("output_size_provenance", "unknown"),
+        "expected_workspace_bytes": contract.get("expected_workspace_bytes"),
     }
 
 
@@ -189,8 +206,9 @@ def public_analysis(analysis_id: str, metadata: dict[str, Any], tracks: list[dic
             "ignored_timestamp": bool(metadata.get("ignored_timestamp")),
             "ignored_playlist": bool(metadata.get("ignored_playlist")),
         },
+        "effective_mp3_bitrate": metadata.get("effective_mp3_bitrate"),
         "audio_tracks": [
-            {"language": track.get("language"), "role": track.get("role"), "codec": track.get("codec")}
+            {key: track.get(key) for key in ("track_key", "language", "role", "codec", "codecs", "representation_count")}
             for track in tracks
         ],
         "choices": [item["public"] for item in choices],

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,9 +15,13 @@ from app.main import create_app
 from app.security import operator_exists, set_password
 from app.db import connect
 
-FFMPEG = "/usr/local/bin/ffmpeg"
-FFPROBE = "/workspace/bin/ffprobe"
-DENO = "/workspace/bin/deno"
+def tool(name: str, variable: str) -> str:
+    return os.environ.get(variable) or shutil.which(name) or name
+
+
+FFMPEG = tool("ffmpeg", "FFMPEG_PATH")
+FFPROBE = tool("ffprobe", "FFPROBE_PATH")
+DENO = tool("deno", "DENO_PATH")
 PASSWORD = "local-password-1"
 
 
@@ -28,6 +33,13 @@ def _run(cmd: list[str]) -> None:
 
 @pytest.fixture(scope="session")
 def media_root(tmp_path_factory) -> Path:
+    for path in (FFMPEG, FFPROBE):
+        if not shutil.which(path):
+            pytest.fail(f"Required media tool not found: {path}. Set FFMPEG_PATH/FFPROBE_PATH or install on PATH.")
+    proc = subprocess.run([FFMPEG, "-hide_banner", "-encoders"], capture_output=True, text=True)
+    for encoder in ("libx264", "aac", "libmp3lame", "libvpx-vp9", "libopus"):
+        if encoder not in proc.stdout:
+            pytest.fail(f"Required fixture encoder missing: {encoder}")
     root = tmp_path_factory.mktemp("media")
     _run(
         [

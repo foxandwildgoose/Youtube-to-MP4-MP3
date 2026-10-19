@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from app.config import Settings
 from app.errors import AppError
+from app.services.format_planner import display_size, frame_rate, is_hdr, norm_language, norm_rotation
 
 
 def probe(settings: Settings, path: Path) -> dict[str, Any]:
@@ -38,15 +40,20 @@ def probe(settings: Settings, path: Path) -> dict[str, Any]:
         raise AppError("OUTPUT_INVALID", 500) from exc
 
 
-def _rate(value: str | None) -> float | None:
-    if not value or value in {"0/0", "N/A"}:
-        return None
-    if "/" in value:
-        num, den = value.split("/", 1)
-        if float(den) == 0:
-            return None
-        return float(num) / float(den)
-    return float(value)
+def _rate(value: Any) -> float | None:
+    return frame_rate(value)
+
+
+def media_rotation(video: dict[str, Any]) -> int:
+    for item in video.get("side_data_list") or []:
+        if item.get("rotation") is not None:
+            return norm_rotation(item["rotation"])
+    return norm_rotation((video.get("tags") or {}).get("rotate"))
+
+
+def duration_tolerance(duration: float) -> float:
+    """Container/encoder delay allowance: 150 ms to 2 s, never 8% truncation."""
+    return max(0.15, min(2.0, duration * 0.001))
 
 
 def validate_output(settings: Settings, path: Path, contract: dict[str, Any]) -> dict[str, Any]:
@@ -71,7 +78,7 @@ def validate_output(settings: Settings, path: Path, contract: dict[str, Any]) ->
     videos = [stream for stream in streams if stream.get("codec_type") == "video"]
     audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
     if contract.get("has_video"):
-        if not videos:
+        if len(videos) != 1:
             raise AppError("OUTPUT_INVALID", 500)
         video = videos[0]
         if video.get("codec_name") != contract.get("output_vcodec"):
@@ -82,8 +89,21 @@ def validate_output(settings: Settings, path: Path, contract: dict[str, Any]) ->
             depth = video.get("bits_per_raw_sample")
             if depth not in (None, "8", 8):
                 raise AppError("OUTPUT_INVALID", 500)
-        width = int(video.get("width") or 0)
-        height = int(video.get("height") or 0)
+        if is_hdr(video):
+            raise AppError("OUTPUT_INVALID", 500)
+        encoded_width = int(video.get("width") or 0)
+        encoded_height = int(video.get("height") or 0)
+        rotation = media_rotation(video)
+        if rotation < 0 or rotation != norm_rotation(contract.get("output_rotation")):
+            raise AppError("OUTPUT_INVALID", 500)
+        for field, actual in (("output_encoded_width", encoded_width), ("output_encoded_height", encoded_height)):
+            if contract.get(field) and actual != int(contract[field]):
+                raise AppError("OUTPUT_INVALID", 500)
+        width, height = display_size(encoded_width, encoded_height, rotation)
+        promised_rate = _rate(contract.get("output_fps"))
+        actual_rate = _rate(video.get("avg_frame_rate"))
+        if promised_rate and (actual_rate is None or abs(actual_rate - promised_rate) > max(0.01, min(0.2, promised_rate * 0.005))):
+            raise AppError("OUTPUT_INVALID", 500)
         if contract.get("output_width") and abs(width - int(contract["output_width"])) > 2:
             raise AppError("OUTPUT_INVALID", 500)
         if contract.get("output_height") and abs(height - int(contract["output_height"])) > 2:
@@ -91,7 +111,7 @@ def validate_output(settings: Settings, path: Path, contract: dict[str, Any]) ->
     elif videos and contract.get("kind") != "mp4":
         raise AppError("OUTPUT_INVALID", 500)
     if contract.get("has_audio"):
-        if not audios:
+        if len(audios) != 1:
             raise AppError("OUTPUT_INVALID", 500)
         audio = audios[0]
         expected_audio = contract.get("output_acodec")
@@ -114,27 +134,33 @@ def validate_output(settings: Settings, path: Path, contract: dict[str, Any]) ->
         language = contract.get("audio_language")
         tags = audio.get("tags") or {}
         reported = (tags.get("language") or tags.get("LANGUAGE") or "").lower()
-        if language and reported and reported not in {language.lower(), _iso3(language)}:
+        if language and reported and (norm_language(reported) or "").split("-")[0] != (norm_language(language) or "").split("-")[0]:
             raise AppError("OUTPUT_INVALID", 500)
-    elif audios and contract.get("kind") == "mp4" and not contract.get("has_audio"):
-        pass
+    elif audios:
+        raise AppError("OUTPUT_INVALID", 500)
     duration = fmt.get("duration")
+    try:
+        actual_duration = float(duration)
+    except (ValueError, TypeError) as exc:
+        raise AppError("OUTPUT_INVALID", 500) from exc
+    if actual_duration <= 0 or not math.isfinite(actual_duration):
+        raise AppError("OUTPUT_INVALID", 500)
     expected_duration = contract.get("duration")
-    if expected_duration and duration not in (None, "N/A"):
-        actual = float(duration)
-        limit = max(0.75, float(expected_duration) * 0.08)
-        if abs(actual - float(expected_duration)) > limit:
-            raise AppError("OUTPUT_INVALID", 500)
-    elif expected_duration and not duration:
+    if expected_duration and abs(actual_duration - float(expected_duration)) > duration_tolerance(float(expected_duration)):
         raise AppError("OUTPUT_INVALID", 500)
     return {
         "bytes": path.stat().st_size,
-        "duration": float(duration) if duration not in (None, "N/A") else None,
+        "duration": actual_duration,
         "format_name": format_name,
+        "video": {
+            "codec": videos[0].get("codec_name"),
+            "encoded_width": int(videos[0].get("width") or 0),
+            "encoded_height": int(videos[0].get("height") or 0),
+            "rotation": media_rotation(videos[0]),
+            "fps": _rate(videos[0].get("avg_frame_rate")),
+        } if videos else None,
+        "audio": {
+            "codec": audios[0].get("codec_name"),
+            "bitrate_kbps": int(audios[0]["bit_rate"]) / 1000 if audios[0].get("bit_rate") else None,
+        } if audios else None,
     }
-
-
-def _iso3(language: str) -> str:
-    return {"ko": "kor", "en": "eng", "ja": "jpn", "zh": "zho", "es": "spa", "fr": "fra", "de": "deu"}.get(
-        language.lower(), language.lower()
-    )

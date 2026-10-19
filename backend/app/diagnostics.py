@@ -5,6 +5,9 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import subprocess
+import threading
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,14 +15,11 @@ from app.config import Settings
 from app.db import utc_iso, utc_now
 from app.services.storage import free_bytes, managed_bytes
 
-VERSIONS = {
-    "app": "1.0.0",
-    "yt_dlp": "2026.08.19",
-    "yt_dlp_ejs": "0.8.0",
-    "deno": "2.9.7",
-    "ffmpeg": "7.0.2-static",
-    "verified_on": "2026-10-18",
-}
+_TOOLS_CACHE: dict[tuple[str, str, str], tuple[float, dict]] = {}
+_TOOLS_LOCK = threading.Lock()
+TOOLS_CACHE_SECONDS = 60
+
+VERSIONS = {"app": "1.0.0"}
 
 
 def _first_line(cmd: list[str]) -> str | None:
@@ -65,37 +65,21 @@ def diagnostics(settings: Settings, conn: sqlite3.Connection) -> dict:
         age = (utc_now() - when).total_seconds()
         stale = age > 30
         heartbeat = {"age_seconds": int(age), "stale": stale, "pid": beat["pid"]}
-    encoders = _encoders(settings.ffmpeg_path)
-    try:
-        import yt_dlp
-        import yt_dlp_ejs
-
-        ytdlp_version = yt_dlp.version.__version__
-        ejs_version = str(yt_dlp_ejs.version)
-    except Exception:
-        ytdlp_version = None
-        ejs_version = None
-    deno = _first_line([settings.deno_path, "--version"])
-    ffmpeg = _first_line([settings.ffmpeg_path, "-version"])
-    ffprobe = _first_line([settings.ffprobe_path, "-version"])
-    ready = all(
-        [
-            db_ok,
-            writable,
-            not stale,
-            bool(ytdlp_version),
-            bool(ejs_version),
-            bool(deno),
-            bool(ffmpeg),
-            bool(ffprobe),
-            encoders["libx264"],
-            encoders["aac"],
-            encoders["libmp3lame"],
-            free_bytes(settings) >= settings.min_free_bytes,
-        ]
-    )
+    tools = _tool_summary(settings)
+    encoders = tools["encoders"]
+    ytdlp_version, ejs_version = tools["yt_dlp"], tools["yt_dlp_ejs"]
+    deno, ffmpeg, ffprobe = tools["deno"], tools["ffmpeg"], tools["ffprobe"]
+    dependencies_ready = all([
+        bool(ffmpeg), bool(ffprobe), encoders["libx264"], encoders["aac"], encoders["libmp3lame"],
+        settings.demo_data or bool(ytdlp_version and ejs_version and deno),
+    ])
+    ready = all([
+        db_ok, writable, not stale, dependencies_ready,
+        free_bytes(settings) >= settings.min_free_bytes,
+    ])
     return {
         "ready": ready,
+        "dependencies_ready": dependencies_ready,
         "youtube_reachable": None,
         "demo_data": settings.demo_data,
         "database": db_ok,
@@ -105,14 +89,7 @@ def diagnostics(settings: Settings, conn: sqlite3.Connection) -> dict:
         "minimum_free_bytes": settings.min_free_bytes,
         "storage_limit_bytes": settings.max_storage_bytes,
         "worker": heartbeat,
-        "tools": {
-            "ffmpeg": ffmpeg,
-            "ffprobe": ffprobe,
-            "deno": deno,
-            "yt_dlp": ytdlp_version,
-            "yt_dlp_ejs": ejs_version,
-            "encoders": encoders,
-        },
+        "tools": tools,
         "flags": {
             "playlists_enabled": settings.enable_playlists,
             "transcoding_enabled": settings.enable_transcoding,
@@ -133,16 +110,47 @@ def diagnostics(settings: Settings, conn: sqlite3.Connection) -> dict:
             "active_job_deadline_seconds": settings.active_job_deadline_seconds,
             "max_auto_retries": settings.max_auto_retries,
         },
-        "versions": {**VERSIONS, "yt_dlp_runtime": ytdlp_version, "ejs_runtime": ejs_version, "reported_at": utc_iso()},
+        "versions": {**VERSIONS, "yt_dlp": ytdlp_version, "yt_dlp_ejs": ejs_version,
+                     "deno": deno, "ffmpeg": ffmpeg, "ffprobe": ffprobe,
+                     "yt_dlp_runtime": ytdlp_version, "ejs_runtime": ejs_version, "reported_at": utc_iso()},
     }
+
+
+def _tool_summary(settings: Settings) -> dict:
+    """Cache expensive executable probes; readiness/heartbeat remain live."""
+    key = (settings.ffmpeg_path, settings.ffprobe_path, settings.deno_path)
+    with _TOOLS_LOCK:
+        cached = _TOOLS_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < TOOLS_CACHE_SECONDS:
+            return dict(cached[1])
+        try:
+            import yt_dlp
+            import yt_dlp_ejs
+
+            ytdlp_version = yt_dlp.version.__version__
+            ejs_version = str(yt_dlp_ejs.version)
+        except Exception:
+            ytdlp_version = ejs_version = None
+        tools = {
+            "ffmpeg": _first_line([settings.ffmpeg_path, "-version"]),
+            "ffprobe": _first_line([settings.ffprobe_path, "-version"]),
+            "deno": _first_line([settings.deno_path, "--version"]),
+            "yt_dlp": ytdlp_version, "yt_dlp_ejs": ejs_version,
+            "encoders": _encoders(settings.ffmpeg_path),
+        }
+        # Tool paths are operator config; bound the cache across test/settings instances.
+        if len(_TOOLS_CACHE) >= 8:
+            _TOOLS_CACHE.clear()
+        _TOOLS_CACHE[key] = (time.monotonic(), tools)
+        return dict(tools)
 
 
 def os_access(path: Path) -> bool:
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".write-probe"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink()
+        with tempfile.TemporaryFile(dir=path, mode="w+", encoding="utf-8") as probe:
+            probe.write("ok")
+            probe.flush()
         return True
     except OSError:
         return False

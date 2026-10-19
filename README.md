@@ -1,172 +1,191 @@
-# 서랍
+# 서랍 · YouTube MP4 / MP3
 
-A personal, single-user tool that turns one public YouTube URL into one MP4 or MP3 file and keeps it on this machine.
+YouTube 영상 주소 하나로 MP4 영상 또는 MP3 오디오를 만들고 자신의 컴퓨터에
+보관하는 한국어 우선 개인 도구입니다. 영어와 밝게/어둡게/시스템 테마를 지원합니다.
+React·FastAPI·별도 작업자·SQLite·yt-dlp·FFmpeg 구조를 유지했습니다.
 
-Download only material you are allowed to download and use. Copyright and YouTube's terms are separate questions from whether a file is technically reachable. Private or noncommercial use does not by itself grant permission. YouTube Premium offline viewing is not an MP4/MP3 export feature. For your own uploads, use YouTube Studio or Google Takeout.
+받을 권리가 있는 자료만 저장하세요. 저작권과 YouTube 약관은 별개이며 개인적 사용이
+자동으로 허락을 뜻하지 않습니다. 자신의 업로드는
+[YouTube Studio/Takeout 안내](https://support.google.com/youtube/answer/56100?hl=ko)를
+참고하세요. [YouTube 약관](https://www.youtube.com/static?template=terms).
 
-- [YouTube terms](https://www.youtube.com/static?template=terms)
-- [Download your own uploads](https://support.google.com/youtube/answer/56100?hl=en)
+## 지원 기본 실행: 인증된 로컬 Docker Compose
 
-The screen defaults to Korean. The language control switches it to English. Source titles stay in their original language.
+Docker Engine/Desktop와 Compose **2.24.4 이상**, Linux amd64 이미지를 사용합니다.
+ARM 머신은 명시적 amd64 에뮬레이션이 필요하며 네이티브 ARM 이미지는 지원하지 않습니다.
+앱과 작업자는 UID10001, 읽기 전용 루트, 전용 영구 볼륨을 사용하고
+`127.0.0.1:8000`에만 공개합니다. LAN/공개 서버로 바꾸는 배포는 이 지원 범위가 아닙니다.
 
-## What it does
-
-Paste a watch, youtu.be, Shorts, or matching music/mobile link. A watch URL that also carries a playlist parameter processes only that video. A timestamp is ignored; clipping is not in this version. Channels, search pages, pure playlists, live and upcoming streams, login-only videos, members-only videos, and DRM are rejected with a specific reason.
-
-Outputs:
-
-- Compatible MP4: H.264, 8-bit 4:2:0 SDR, AAC when the source has audio. Streams that already match are copied. Portrait dimensions are kept.
-- MP3: 128, 192, or 320 kbps. The default is 192. A higher bitrate cannot restore missing detail.
-- Original audio: the platform stream, copied. AAC becomes M4A. Opus stays in WebM. This is not the uploader's master file.
-
-"Create a new file" always rechecks the source. "Download to this device" saves the file the server already has. The browser chooses the folder on your computer.
-
-## Reference deployment
-
-Docker Compose on one computer. The API and the worker share an image. SQLite and media sit on a named local volume. Only `127.0.0.1:8000` is published. This is not a public service, and this repository does not deploy one.
-
-The preview shell in this workspace is a separate Vite host required by that environment. It proxies the API. It is not the Compose runtime. If that API is down, the screen says **Backend not connected** and does not pretend a download succeeded.
-
-### Defaults
-
-| Setting | Default |
-| --- | --- |
-| Media concurrency | 1 |
-| Analysis concurrency | 1 |
-| Waiting jobs | 20 |
-| Analysis TTL / deadline | 10 minutes / 60 seconds |
-| Maximum source duration | 4 hours |
-| Native MP4 cap / default selection | 2160p / up to 1080p |
-| Conversion cap | 1080p SDR, and only when enabled |
-| MP3 default | 192 kbps |
-| Input and final file | 5 GiB each |
-| Job workspace | 12 GiB |
-| Managed storage | 50 GiB |
-| Minimum free space | 2 GiB |
-| Active job deadline | 2 hours, not counting queue time |
-| Unretained files | 24 hours |
-| Ordinary history | 90 days; kept-file records remain |
-| Automatic retries | at most 2 extra attempts |
-| Playlists | off; first 20 entries when enabled |
-| Video conversion | off until you enable it |
-
-These are product limits, not YouTube's limits. A 4-hour source can still miss the 2-hour processing deadline. Leave several gigabytes free beyond the file you expect. Estimates are not filesystem quotas.
-
-### Linux and macOS
+Linux/macOS:
 
 ```sh
-cp .env.example .env
 sh scripts/setup.sh
-docker compose exec -it app python -m app.cli bootstrap
+docker compose exec app python -m app.cli bootstrap
 ```
 
-Open `http://127.0.0.1:8000`.
-
-### Windows PowerShell
+Windows PowerShell5.1 또는7:
 
 ```powershell
-Copy-Item .env.example .env
 powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
-docker compose exec -it app python -m app.cli bootstrap
+docker compose exec app python -m app.cli bootstrap
 ```
 
-To show finished files in a chosen Windows folder, replace the named volume on both services with a bind mount such as `C:\Seorap\library:/data`. Inside the container the library is `/data/files`. The host folder's permissions must allow user id 10001. Do not put the SQLite directory on a network share.
-
-### Password
-
-`python -m app.cli bootstrap` reads the password without echoing it and stores a scrypt hash. `reset-password` replaces it and revokes sessions. `ALLOW_HTTP_BOOTSTRAP` stays `0` in `.env.example`. The preview process in this workspace sets it to `1` only so a person without a shell can set the first password from loopback. That is not the Compose default.
-
-### Everyday commands
+설치 스크립트는 없는 `.env`만 비밀값 없는 `.env.example`에서 만들며 기존 파일을
+덮어쓰지 않습니다. Docker CLI·Compose·daemon과 시작 준비를 따로 확인합니다.
+CLI에서 비밀번호를 설정한 뒤 **http://127.0.0.1:8000** 에 로그인하세요.
+초기 화면의 ‘다시 확인’으로 설정 완료를 확인할 수 있습니다. 기본 구성은
+브라우저 첫 비밀번호 설정을 허용하지 않습니다. 비밀번호/쿠키를 저장소에 넣지 마세요.
 
 ```sh
-docker compose up -d
+docker compose up -d --wait
 docker compose stop
 docker compose start
 docker compose exec app python -m app.cli reset-password
+docker compose logs --tail 100 app worker
 ```
 
-Stopping the containers does not delete the volume. Deleting the volume deletes the password, history, and files. Do not do that as part of an update.
+`unless-stopped`는 예상하지 못한 종료를 복구하고 명시적 중지는 존중합니다.
+healthcheck는 재시작 정책 자체가 아니며, 긴 미디어 작업 중에도 heartbeat가 유지됩니다.
+볼륨 삭제(`down -v`)는 비밀번호·기록·파일을 없애므로 업데이트에 사용하지 않습니다.
 
-Authenticated diagnostics are at `GET /api/v1/diagnostics` after you sign in (the Diagnostics control). `GET /healthz` only says the process is up. A healthy process does not mean YouTube can be reached.
+새 named volume은 필요한 네 디렉터리만 초기화합니다. 기존 볼륨 전체를 재귀 chown하지
+않습니다. 호스트 bind mount를 사용하려면 해당 **전용** 디렉터리와 `state/tmp/files/logs`를
+UID/GID10001에 미리 허용하고 초기화기가 탐색할 수 있도록 전용 루트는0755로 준비하세요. SQLite를 SMB/NFS에 두지 마세요. Docker Desktop의
+Windows bind-mount 권한은 플랫폼별로 확인해야 하며 named volume이 기본입니다.
+다른 UID로 만든 기존 데이터를 가져오면 먼저 서비스 중지·백업 후 SQLite DB/WAL/SHM과
+`files/<job-id>`·`tmp/<job-id>`의 디렉터리/파일에도 UID10001이 필요한 읽기·쓰기·탐색
+권한을 갖도록 관리자가 해당 경로만 준비해야 합니다. 초기화기는 기존 파일 소유권을
+자동 변환하지 않으며, 관련 없는 파일이나 호스트 전체의 권한을 바꾸지 마세요.
 
-### Backup and restore
+## 사용 흐름
 
-Quiesce the worker, then use the SQLite backup API from inside the app container:
+1. MP4 영상 또는 MP3 오디오를 고르고 주소를 붙여 넣어 **링크 분석**합니다.
+2. 실제 서버 선택지의 권장 출력·화질·오디오 언어를 확인하고 **MP4/MP3 만들기**를 누릅니다.
+3. 서버가 처리하고 검증을 마친 뒤 **이 기기에 받기**로 기존 파일을 전송합니다.
 
-```sh
-docker compose stop worker
-docker compose exec -T app python -c "import sqlite3; s=sqlite3.connect('/data/state/app.db'); t=sqlite3.connect('/data/state/app.db.bak'); s.backup(t); t.close(); s.close()"
-docker compose start worker
-```
+주소를 바꾸면 이전 분석/동의를 무효화합니다. 응답이 유실된 만들기 요청은 같은 제출
+키로 복구하며, 의도한 새 작업과 구별합니다. 활성 작업은 새로고침과 SSE 실패 후에도
+반복 조회로 복구합니다. 기록 검색·형식/상태/파일 필터·페이지 이동으로 오래된 보관 파일도
+찾을 수 있습니다. ‘서버 파일 삭제’와 ‘기록 삭제’는 별개이며 파일 삭제에는 확인이 필요합니다.
+브라우저 다운로드 폴더/다른 이름으로 저장 설정이 기기 목적지를 정합니다. 클릭만으로
+기기 저장이 끝났다고 보고하지 않습니다.
 
-From a checkout, with `DATA_DIR` pointing at the volume:
+호환 MP4는 H.264·8bit420 SDR/AAC입니다. 적합한 스트림은 복사/리먹스합니다.
+영상 변환은 서버 스위치와 명시적 동의가 필요합니다. MP3는128/192/320kbps 인코딩이며
+기본192kbps(설정에서 변경)입니다. 높은 출력 비트레이트가 잃어버린 원본 품질을 복원하지
+않습니다. 원본 오디오는 고급 옵션이며 업로더의 마스터 파일이 아닙니다.
 
-```sh
-DATA_DIR=/path/to/volume python scripts/backup.py /path/to/app.db.bak
-```
+설정의 언어·테마·MP3 기본값은 다음 작업에 적용하며 이미 큐에 들어간 계약은 바꾸지
+않습니다. source title/channel은 번역하지 않습니다. 선택적 재생목록 검사는 기본 끔,
+최대20개 위치만 확인하고 사용자가 고른 한 영상만 분석합니다. 로그인/멤버/DRM/진행 중
+라이브 우회, 자막/채널 일괄 수집, 프록시 회전은 제공하지 않습니다.
 
-Restore by stopping both services, replacing `state/app.db` (and removing leftover `-wal` and `-shm` files) with the backup, then starting again.
+## 기본 정책과 저장소
 
-### Upgrade and rollback
-
-Pin `yt-dlp` and `yt-dlp-ejs` together in `backend/requirements.txt`. Rebuild, run `pytest`, and keep the previous image tag (`docker image tag seorap:local seorap:previous` before building). Roll back with `docker compose up -d` after tagging `previous` back to `seorap:local`. Do not auto-update inside a running container. The volume is kept across a normal recreate.
-
-## Configuration
-
-Copy `.env.example`. High-risk limits and paths stay there. The settings screen only stores language, theme, and the preferred MP3 rate.
-
-`ENABLE_PLAYLISTS=true` allows inspection of the first 20 positions and no more. Nothing is selected for you. Each chosen video is analyzed on its own.
-
-`ENABLE_TRANSCODING=true` allows an explicit "convert to compatible MP4" choice for supported SDR. The screen asks for consent and warns that conversion takes longer and can lose quality.
-
-`MEDIA_ADAPTER=fixture` is for tests. Production must stay on `ytdlp`.
-
-## Layout
-
-| Path | Role |
+| 항목 | 기본값 |
 | --- | --- |
-| `backend/app` | API, worker, engine, planner, storage |
-| `src/features/downloads` | The screen, shared by the preview and the static build |
-| `frontend/` | Vite entry that FastAPI serves |
-| `data/` in this checkout, `/data` in Compose | `state/`, `tmp/`, `files/`, `logs/` |
-| `docs/ARCHITECTURE.md` | Worker, formats, and the local network boundary |
-| `docs/VERIFICATION.md` | Commands that were actually run |
+| 미디어/분석 동시성 | 각각1 (미디어는1만 지원) |
+| 대기 작업 상한 |20|
+| 분석 유효시간/제한시간 |10분/60초|
+| 영상 길이/작업 활성 제한시간 |4시간/2시간(큐 대기 제외)|
+| 네이티브 MP4 상한/권장 선택 |실제 제공될 때2160p/1080p 이하|
+| 명시적 SDR 영상 변환 |기본 끔,1080p 이하|
+| 입력/최종 파일/작업공간 |각5GiB/5GiB/12GiB|
+| 전체 관리공간/최소 디스크 여유 |50GiB/2GiB|
+| 보관하지 않은 완료 파일/일반 기록 |24시간/90일|
+| 추가 자동 시도 |최대2회, 영구 cooldown/backoff 적용|
 
-Logical folder shown in the screen: Library (`/data/files` on the server).
+예약은 입장한 작업마다 작업공간 최대값을 잡는 보수적 정책이므로 실제 입장 수는
+디스크와 용량에 따라20보다 작습니다. 입력 크기·추정 출력·작업공간은 다른 개념입니다.
+실행 중 실제 바이트를 검사하며 보관 파일은 공간 확보를 위해 자동 삭제하지 않습니다.
+DB/WAL와 로그도 전체 관리공간에 포함합니다. 파일은 `/data/files`, DB는 `/data/state`입니다.
 
-## Failure diagnosis
+## 개발과 회귀 검사
 
-The API returns `{ "error": { "code", "message", "retryable", "action" } }`. `SOURCE_AUTH_REQUIRED` is not the same as a bad URL. `SOURCE_RATE_LIMITED` waits out a cooldown before the next probe. `FORMAT_CHANGED` means analyze again. `FILE_EXPIRED`, `FILE_MISSING`, and a deleted file are different states.
-
-A 403 is not retried forever. One metadata refresh is allowed inside a shared budget of three attempts total. There is no cookie import, proxy rotation, or CAPTCHA handling.
-
-## Tests
+Node22.12 이상 또는24, **npm11.9.0**, Python3.12, FFmpeg/ffprobe 및 Deno2.9.7을
+사용합니다. Docker 이미지와 CI도 npm 버전을 맞춥니다. Deno 설치는 공식 amd64
+SHA256을 검증하며 mismatch에서 실패합니다. 실행 중 자동 업데이트하지 않습니다.
 
 ```sh
-cd backend && python -m pytest
+npm ci
+python3 -m venv .venv
+.venv/bin/python -m pip install -r backend/requirements-test.txt
+sh scripts/install-deno.sh "$PWD/bin"
+export PATH="$PWD/bin:$PWD/.venv/bin:$PATH"
+npm run check:contracts
+npm run typecheck
+npm run lint
+npm test
+npm run test:downloads
+python -m pytest backend/tests -rs
+python scripts/check-backup.py
+npm run build:spa
 ```
 
-That suite uses short FFmpeg fixtures. It does not contact YouTube. An authorized live check is separate:
+테스트 도구는 명시적 `FFMPEG_PATH/FFPROBE_PATH/DENO_PATH` 다음 PATH 순서로 찾습니다.
+기본 회귀는 실제 합성 미디어를 사용하며 YouTube에 접속하지 않습니다. 런타임 이미지에는
+pytest를 넣지 않으며 `--target test`가 별도의 테스트 환경입니다.
 
 ```sh
-cd backend && LIVE_TEST_URL='https://www.youtube.com/watch?v=YOUR_PERMITTED_VIDEO' python -m pytest tests/test_live_smoke.py -rs
+docker build --target test -t seorap:test .
+docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,size=34359738368,mode=1777 --init seorap:test
 ```
 
-Without `LIVE_TEST_URL` that test is skipped. A skipped live test is not a pass against YouTube.
+합성 Compose/브라우저 여정은 [검증 기록](docs/VERIFICATION.md)의 명령을 사용합니다.
+격리된 테스트 볼륨과 테스트 비밀번호 파일을 요구하며 일반 데이터에 seed/만료 조작을
+하지 못하도록 보호합니다. 실제 YouTube 검사는 명시적 허가를 받은 짧은
+`LIVE_TEST_URL`이 있을 때만 MP4/MP3 두 검사를 수행합니다. 없으면 skipped이며
+합성 파일·화면 렌더링을 라이브 성공으로 간주하지 않습니다.
 
-## Third-party notices
+Grok 개발 프로필은 별도입니다:
 
-Components are separately licensed. Do not treat them as one license.
+```sh
+sh /workspace/startup.sh
+npm run build
+npm run preview:restart
+npm run preview:stop
+```
 
-- yt-dlp 2026.8.19 — Unlicense
-- yt-dlp-ejs 0.8.0 — see the package metadata
-- Deno 2.9.7 — MIT
-- FFmpeg — the static build used in this workspace is GPL (libx264, libmp3lame). The Debian `ffmpeg` package used by the image has its own licensing; check `ffmpeg -version` and the distro copyright file
-- FastAPI, Starlette, Uvicorn, Pydantic — MIT
-- React — MIT
+8080 개발 UI, 루프백8000 API, 별도 작업자를 함께 실행합니다. `startup.sh`는 독립적으로
+부족한 프로세스만 복구하고 인증 설정을 끄지 않습니다. PWA 브랜딩·미리보기 브리지는
+유지합니다. `npm run build`의 frontend-only Nitro/Vercel 출력만으로 영구 처리 서비스가
+생기지는 않습니다. API 없이 보이는 화면은 동작하는 다운로더의 증거가 아닙니다.
+알려진 플랫폼 프록시를 추가해야 한다면 `SEORAP_PREVIEW_ALLOWED_HOSTS`에 실제
+요청 Host(포트 포함), `SEORAP_PREVIEW_ORIGINS`에 정확한 Origin을 쉼표로 구분해
+설정하고 개발/빌드 서버를 재시작하세요. 와일드카드나 임의 출처는 허용하지 않습니다.
+관리형 클라우드에서 중첩 Docker의 프록시 CA가 필요하면
+`docker-compose.cloud.yml`을 추가하고 `CODEX_PROXY_CERT` 바인딩을 사용합니다.
+TLS/서명/체크섬 검증을 끄지 않습니다.
 
-This project does not copy Cobalt or MeTube source. Those products are interface references only.
+## 업데이트·백업·복원
 
-## Network boundary
+마이그레이션0002는 기존 비밀번호·기록·보관 파일을 유지하며 예약/재시도 상태와 인덱스를
+추가합니다. 실패하면 DDL과 버전 마커를 함께 rollback합니다. 먼저 앱/작업자를 중지하고
+SQLite backup API로 일관된 DB 복사본을 만든 뒤 media files와 함께 외부에 백업하세요.
+실행 중인 DB 본체만 복사하고 WAL을 무시하지 마세요.
 
-The supported deployment is an authenticated loopback service. Publishing it on a public interface, or assuming an input allowlist blocks every outbound CDN request, is unsupported. A VPN only changes who can open the page.
+```sh
+docker compose stop app worker
+docker compose run --rm --no-deps --entrypoint python app -c "import sqlite3; s=sqlite3.connect('/data/state/app.db'); t=sqlite3.connect('/data/state/app.db.bak'); s.backup(t); t.close(); s.close()"
+docker compose start app worker
+```
+
+체크아웃에서 SQLite 백업은 `DATA_DIR=/path/to/volume python scripts/backup.py /path/to/app.db.bak`.
+`state` 백업과 `files`를 함께 보존하고, 복원은 두 서비스를 중지한 상태에서 수행합니다.
+보존한 DB로 교체할 때 이전 `-wal/-shm`도 함께 정리하고 동일 시점 파일을 복원합니다.
+시험 복원은 별도 볼륨에서 하세요. 이전 이미지 태그와 일치하는 DB/파일 백업을 보관해야
+롤백할 수 있으며 schema downgrade를 자동 실행하지 않습니다. yt-dlp/EJS는 함께
+고정·재빌드·fixture 재검증하고 이전 이미지 태그를 유지하세요.
+
+## 문서와 라이선스
+
+- [구조·보안·저장소 경계](docs/ARCHITECTURE.md)
+- [API와 오류 계약](docs/API.md)
+- [전체60개 이슈 추적](docs/ISSUE_TRACEABILITY.md)
+- [실제 실행 명령·검증 결과·제한](docs/VERIFICATION.md)
+- [초기 의사결정/상태 표](docs/OVERHAUL_DECISIONS.md)
+
+각 구성요소의 라이선스는 별개입니다: yt-dlp(Unlicense), Deno/React/FastAPI/Starlette/
+Uvicorn/Pydantic(MIT), Pillow(HPND), yt-dlp-ejs(배포 패키지 메타데이터 참고),
+FFmpeg(이미지의 Debian 빌드 구성과 저작권 파일 참고). cobalt/MeTube 등의 코드는
+복사하지 않았습니다. 비교 서비스의 처리 속도·안전·4K 성공을 보장하지 않습니다.

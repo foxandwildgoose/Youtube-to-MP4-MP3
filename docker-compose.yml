@@ -1,20 +1,43 @@
-# Loopback-only personal deployment. Do not publish 0.0.0.0.
-# Optional Windows folder, instead of the named volume:
-#   volumes:
-#     - type: bind
-#       source: C:\Seorap\library
-#       target: /data
-# The SQLite files live under /data/state. Do not put that path on SMB or NFS.
-
+# Authenticated loopback deployment. Keep SQLite on a local filesystem.
+# Supported image architecture: linux/amd64 (ARM requires Docker emulation).
 name: seorap
+
+x-build: &build
+  context: .
+  target: runtime
+x-common: &common
+  image: seorap:local
+  platform: linux/amd64
+  user: "10001:10001"
+  env_file:
+    - .env
+  volumes:
+    - seorap-data:/data
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=268435456,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  stop_grace_period: 40s
+  cpus: "1.50"
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 services:
   volume-init:
-    build: .
+    build: *build
     image: seorap:local
+    platform: linux/amd64
     user: "0:0"
     restart: "no"
-    entrypoint: ["sh", "-c", "mkdir -p /data/state /data/tmp /data/files /data/logs && chown -R 10001:10001 /data"]
+    entrypoint: ["sh", "/opt/seorap/init-volume.sh"]
     volumes:
       - seorap-data:/data
     read_only: true
@@ -22,78 +45,38 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
 
   app:
-    image: seorap:local
+    <<: *common
     depends_on:
       volume-init:
         condition: service_completed_successfully
-    user: "10001:10001"
-    env_file:
-      - .env
     ports:
       - "127.0.0.1:8000:8000"
-    volumes:
-      - seorap-data:/data
-    init: true
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    stop_grace_period: 40s
     mem_limit: 1536m
-    cpus: "1.50"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
-      interval: 30s
+      interval: 15s
       timeout: 5s
       retries: 3
       start_period: 20s
 
   worker:
-    image: seorap:local
+    <<: *common
     depends_on:
       volume-init:
         condition: service_completed_successfully
-    user: "10001:10001"
-    env_file:
-      - .env
     command: ["python", "-m", "app.worker"]
-    volumes:
-      - seorap-data:/data
-    init: true
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    stop_grace_period: 40s
     mem_limit: 2048m
-    cpus: "1.50"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
     healthcheck:
       test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import sqlite3,datetime; c=sqlite3.connect('/data/state/app.db'); r=c.execute('select beat_at from worker_heartbeat where id=1').fetchone(); assert r and (datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(r[0])).total_seconds()<30",
-        ]
-      interval: 30s
+        - CMD
+        - python
+        - -c
+        - "import sqlite3,datetime; c=sqlite3.connect('/data/state/app.db'); r=c.execute('select beat_at from worker_heartbeat where id=1').fetchone(); assert r and 0 <= (datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(r[0])).total_seconds()<30"
+      interval: 10s
       timeout: 5s
       retries: 3
       start_period: 25s

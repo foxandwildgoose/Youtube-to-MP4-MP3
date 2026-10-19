@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { readFileSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import {
+  isAlive,
   looksLikePreviewProcess,
   parseListenerInodes,
   parsePgid,
@@ -255,3 +260,67 @@ test("terminatePids on a free port signals nothing", async () => {
   assert.deepEqual(result, { signalled: [], killed: [], stubborn: [] });
   assert.deepEqual(fake.signals, []);
 });
+
+test(
+  "terminatePids accepts an actual unreaped Linux zombie after SIGTERM",
+  { timeout: 10000 },
+  async (t) => {
+    if (process.platform !== "linux") return t.skip("Linux /proc process states are required");
+    if (spawnSync("python3", ["--version"]).status !== 0)
+      return t.skip("python3 is required to own and reap the child fixture");
+    // Keep the parent alive without waitpid so its terminated child remains a real
+    // zombie for every liveness assertion. The fixture parent reaps it on cleanup.
+    const parent = spawn(
+      "python3",
+      [
+        "-u",
+        "-c",
+        `
+import os
+import signal
+import sys
+pid = os.fork()
+if pid == 0:
+    while True:
+        signal.pause()
+print(pid, flush=True)
+sys.stdin.readline()
+os.waitpid(pid, 0)
+`,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    let childPid;
+    try {
+      const [output] = await once(parent.stdout, "data");
+      childPid = Number(String(output).trim());
+      assert.ok(Number.isInteger(childPid) && childPid > 1);
+      assert.equal(isAlive(parent.pid), true);
+      assert.equal(isAlive(childPid), true);
+      const signals = [];
+      const result = await terminatePids([childPid], {
+        kill: (pid, signal) => {
+          signals.push([pid, signal]);
+          process.kill(pid, signal);
+        },
+        isAlive,
+        sleep: delay,
+        graceMs: 500,
+        pollMs: 10,
+      });
+      assert.deepEqual(result, { signalled: [childPid], killed: [], stubborn: [] });
+      assert.deepEqual(signals, [[childPid, "SIGTERM"]]);
+      const stat = readFileSync(`/proc/${childPid}/stat`, "utf8");
+      assert.equal(stat.slice(stat.lastIndexOf(") ") + 2).split(/\s+/)[0], "Z");
+      assert.doesNotThrow(() => process.kill(childPid, 0));
+      assert.equal(isAlive(childPid), false);
+      assert.equal(stopOutcome({ ...result, after: { pids: [], unattributed: false } }).ok, true);
+    } finally {
+      // Also clean up the child when an assertion fails before terminatePids.
+      if (childPid && isAlive(childPid)) process.kill(childPid, "SIGKILL");
+      const exited = once(parent, "exit");
+      parent.stdin.end("\n");
+      await exited;
+    }
+  },
+);

@@ -1,632 +1,1153 @@
-import { useEffect, useMemo, useState } from "react";
-import { Archive, ClipboardPaste, Download, Languages, LoaderCircle, Moon, Sun } from "lucide-react";
-import { api, type Analysis, type Choice, type Job, type PlaylistInspection, type Session, type Settings } from "./api";
-import { translate, type Locale } from "./i18n";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import * as Tabs from "@radix-ui/react-tabs";
+import {
+  Archive,
+  ArrowRight,
+  ClipboardPaste,
+  Film,
+  Headphones,
+  Link,
+  LogOut,
+  Search,
+  ShieldCheck,
+  X,
+} from "lucide-react";
+import type { Choice, Job } from "./api";
+import { translate } from "./i18n";
+import { useDownloaderController } from "./use-downloader-controller";
+import { JobCard } from "./components/job-card";
+import { SettingsDialog } from "./components/settings-dialog";
+import { BusyLabel, ErrorNotice } from "./components/presentation";
+import {
+  choiceLabel,
+  formatBytes,
+  formatDate,
+  formatDuration,
+  outputSummary,
+} from "./components/formatters";
 
-type Gate = "boot" | "offline" | "setup" | "login" | "ready";
-
-function formatDuration(seconds: number | null | undefined): string {
-  if (seconds == null || Number.isNaN(seconds)) return "—";
-  const total = Math.round(seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  return `${m}:${String(s).padStart(2, "0")}`;
+type Mode = "mp4" | "mp3";
+type Kind = Choice["kind"];
+function semanticChoice(choice: Choice): string {
+  return [
+    choice.kind,
+    choice.width,
+    choice.height,
+    choice.fps,
+    choice.bitrate_kbps,
+    choice.audio_language,
+    choice.audio_role,
+    choice.track_key,
+    choice.container,
+    choice.conversion_required,
+  ].join("|");
 }
-
-function formatBytes(value: number | null | undefined): string {
-  if (value == null) return "—";
-  const units = ["B", "KB", "MB", "GB"];
-  let n = value;
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024;
-    i += 1;
-  }
-  return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-function applyTheme(theme: "light" | "dark" | "system") {
-  const dark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-  localStorage.setItem("seorap-theme", theme);
+function preferredChoice(choices: Choice[], kind: Kind, bitrate: number): Choice | undefined {
+  const items = choices.filter((choice) => choice.kind === kind);
+  return (
+    (kind === "mp3"
+      ? items.find((choice) => choice.bitrate_kbps === bitrate && choice.is_default) ||
+        items.find((choice) => choice.bitrate_kbps === bitrate)
+      : undefined) ||
+    items.find((choice) => choice.is_default) ||
+    items.find((choice) => !choice.requires_consent) ||
+    items[0]
+  );
 }
 
 export function DownloaderApp() {
-  const [locale, setLocale] = useState<Locale>("ko");
+  const c = useDownloaderController(),
+    { locale, theme, analysis, settings } = c;
   const t = translate(locale);
-  const [gate, setGate] = useState<Gate>("boot");
-  const [session, setSession] = useState<Session | null>(null);
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [formError, setFormError] = useState<string | null>(null);
-  const [url, setUrl] = useState("");
-  const [urlError, setUrlError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [analysis, setAnalysis] = useState<Analysis | null>(null);
-  const [tab, setTab] = useState<Choice["kind"]>("mp4");
-  const [choiceId, setChoiceId] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>("mp4");
+  const [useOriginal, setUseOriginal] = useState(false);
+  const [showConversion, setShowConversion] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Partial<Record<Kind, string>>>({});
+  const selectedSemantics = useRef<Partial<Record<Kind, string>>>({});
+  const previousSource = useRef<string | null>(null);
+  const [consentFor, setConsentFor] = useState<string | null>(null);
   const [keep, setKeep] = useState(false);
-  const [consent, setConsent] = useState(false);
-  const [jobs, setJobs] = useState<Job[]>([]);
-  const [parentId, setParentId] = useState<string | null>(null);
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [clipboardNotice, setClipboardNotice] = useState<string | null>(null);
   const [playlistUrl, setPlaylistUrl] = useState("");
-  const [playlist, setPlaylist] = useState<PlaylistInspection | null>(null);
-  const [playlistError, setPlaylistError] = useState<string | null>(null);
-  const [live, setLive] = useState<"live" | "polling">("polling");
-  const [diag, setDiag] = useState<string | null>(null);
-  const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
-
-  const csrf = session && session.authenticated ? session.csrf_token : "";
-
-  useEffect(() => {
-    let stop = false;
-    api.health().then(async (ok) => {
-      if (stop) return;
-      if (!ok) {
-        setGate("offline");
-        return;
-      }
-      try {
-        const current = await api.session();
-        if (stop) return;
-        setSession(current);
-        setGate(current.authenticated ? "ready" : current.bootstrapped ? "login" : "setup");
-      } catch {
-        if (!stop) setGate("offline");
-      }
-    });
-    return () => {
-      stop = true;
-    };
-  }, []);
+  const [historySearch, setHistorySearch] = useState("");
+  const [thumbnailFailed, setThumbnailFailed] = useState(false);
+  const [discardWarning, setDiscardWarning] = useState(false);
+  const urlInput = useRef<HTMLInputElement>(null);
+  const passwordInput = useRef<HTMLInputElement>(null);
+  const analysisHeading = useRef<HTMLHeadingElement>(null);
+  const activeHeading = useRef<HTMLHeadingElement>(null);
+  const kind: Kind = mode === "mp3" && useOriginal ? "original_audio" : mode;
+  const allModeChoices = useMemo(
+    () => analysis?.choices.filter((choice) => choice.kind === kind) || [],
+    [analysis, kind],
+  );
+  const choices = useMemo(
+    () => allModeChoices.filter((choice) => showConversion || !choice.requires_consent),
+    [allModeChoices, showConversion],
+  );
+  const selected = choices.find((choice) => choice.choice_id === selectedIds[kind]) || null;
+  const consentKey = analysis && selected ? `${analysis.analysis_id}:${selected.choice_id}` : null;
+  const consent = consentKey != null && consentFor === consentKey;
+  const ready = c.gate === "ready";
+  const setupAllowed =
+    c.session && "bootstrap_allowed" in c.session ? Boolean(c.session.bootstrap_allowed) : false;
+  const historyLimit = c.historyLimit;
+  const historyFiltered = Boolean(
+    c.historyQuery || c.historyFormat || c.historyStatus || c.historyFileState,
+  );
 
   useEffect(() => {
-    document.documentElement.lang = locale;
-    localStorage.setItem("seorap-lang", locale);
-  }, [locale]);
+    delete selectedSemantics.current.mp3;
+  }, [c.mp3Bitrate]);
 
   useEffect(() => {
-    if (gate !== "ready" || !csrf) return;
-    api.settings(csrf).then((value) => {
-      setSettings(value);
-      setLocale(value.language);
-      setTheme(value.theme);
-      applyTheme(value.theme);
-    }).catch(() => undefined);
-    refreshJobs(csrf);
-  }, [gate, csrf]);
-
-  useEffect(() => {
-    if (theme) applyTheme(theme);
-  }, [theme]);
-
-  const active = jobs.filter((job) => job.status === "queued" || job.status === "running");
-  const history = jobs.filter((job) => job.status !== "queued" && job.status !== "running");
-
-  async function refreshJobs(token = csrf) {
-    if (!token) return;
-    const list = await api.jobs(token);
-    setJobs(list.jobs);
-  }
-
-  async function onSetup(event: React.FormEvent) {
-    event.preventDefault();
-    setFormError(null);
-    if (password !== confirm) {
-      setFormError(t.mismatch);
+    if (!analysis) {
+      setConsentFor(null);
       return;
     }
-    setBusy(true);
-    try {
-      await api.bootstrap(password);
-      const next = await api.login(password);
-      setSession(next);
-      setPassword("");
-      setConfirm("");
-      setGate("ready");
-    } catch (error) {
-      setFormError(messageOf(error));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onLogin(event: React.FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setFormError(null);
-    try {
-      const next = await api.login(password);
-      setSession(next);
-      setPassword("");
-      setGate("ready");
-    } catch (error) {
-      setFormError(messageOf(error));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onAnalyze(event: React.FormEvent) {
-    event.preventDefault();
-    setUrlError(null);
-    setBusy(true);
-    try {
-      const next = await api.analyze(url.trim(), csrf, locale);
-      setAnalysis(next);
-      if (parentId) {
-        const parent = jobs.find((job) => job.id === parentId);
-        if (parent?.source.video_id && parent.source.video_id !== next.source.video_id) setParentId(null);
+    const sameSource = previousSource.current === analysis.source.video_id;
+    const next: Partial<Record<Kind, string>> = {};
+    for (const outputKind of ["mp4", "mp3", "original_audio"] as const) {
+      const previous = selectedSemantics.current[outputKind];
+      const matching = previous
+        ? analysis.choices.find(
+            (choice) => choice.kind === outputKind && semanticChoice(choice) === previous,
+          )
+        : undefined;
+      const fallback =
+        sameSource && previous && !matching
+          ? undefined
+          : preferredChoice(analysis.choices, outputKind, analysis.effective_mp3_bitrate || 192);
+      const choice = matching || fallback;
+      if (choice) {
+        next[outputKind] = choice.choice_id;
+        selectedSemantics.current[outputKind] = semanticChoice(choice);
       }
-      const first = next.choices.find((item) => item.is_default) || next.choices[0];
-      setTab(first?.kind || "mp4");
-      setChoiceId(first?.choice_id || null);
-      setConsent(false);
-    } catch (error) {
-      setAnalysis(null);
-      setUrlError(messageOf(error));
-    } finally {
-      setBusy(false);
     }
-  }
+    previousSource.current = analysis.source.video_id;
+    setSelectedIds(next);
+    setConsentFor(null);
+    setShowConversion(false);
+    setThumbnailFailed(false);
+  }, [analysis]);
 
-  async function onCreate() {
-    if (!analysis || !choiceId) return;
-    setBusy(true);
-    setUrlError(null);
+  useEffect(() => {
+    setPassword("");
+    setConfirmPassword("");
+    setPasswordError(null);
+  }, [c.gate]);
+
+  function selectChoice(id: string) {
+    const choice = analysis?.choices.find((item) => item.choice_id === id);
+    setSelectedIds((current) => ({ ...current, [kind]: id }));
+    if (choice) selectedSemantics.current[kind] = semanticChoice(choice);
+    setConsentFor(null);
+    c.clearError("create");
+  }
+  function focusUrl() {
+    urlInput.current?.focus();
+    urlInput.current?.scrollIntoView({ block: "center", behavior: "auto" });
+  }
+  async function pasteUrl() {
+    focusUrl();
+    if (!navigator.clipboard?.readText) {
+      setClipboardNotice(t.clipboardManual);
+      return;
+    }
     try {
-      const body = {
-        analysis_id: analysis.analysis_id,
-        choice_id: choiceId,
-        keep_on_server: keep,
-        conversion_consent: consent,
-      };
-      const key = crypto.randomUUID();
-      const job = parentId ? await api.retryJob(csrf, locale, parentId, key, body) : await api.createJob(csrf, locale, key, body);
-      setParentId(null);
-      setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
-      watch(job.id);
-    } catch (error) {
-      setUrlError(messageOf(error));
-    } finally {
-      setBusy(false);
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) {
+        setClipboardNotice(t.clipboardEmpty);
+        return;
+      }
+      c.setUrl(text.trim());
+      setConsentFor(null);
+      setClipboardNotice(t.pasted);
+    } catch {
+      setClipboardNotice(t.clipboardManual);
     }
   }
-
-  function watch(id: string) {
-    const source = new EventSource(`/api/v1/jobs/${id}/events`);
-    setLive("live");
-    source.addEventListener("snapshot", (event) => {
-      const job = JSON.parse((event as MessageEvent).data) as Job;
-      setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
-      if (["succeeded", "failed", "cancelled", "interrupted"].includes(job.status)) source.close();
-    });
-    source.onerror = () => {
-      source.close();
-      setLive("polling");
-      api.job(csrf, id).then((job) => {
-        setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
-      }).catch(() => undefined);
-    };
+  async function analyzeUrl(event?: FormEvent) {
+    event?.preventDefault();
+    setClipboardNotice(null);
+    setConsentFor(null);
+    const value = c.url.trim();
+    const result = await c.analyze(value);
+    if (result) window.setTimeout(() => analysisHeading.current?.focus(), 0);
+    else focusUrl();
   }
-
-  const choices = useMemo(() => analysis?.choices.filter((item) => item.kind === tab) || [], [analysis, tab]);
-  const selected = analysis?.choices.find((item) => item.choice_id === choiceId) || null;
+  async function submitAuth(event: FormEvent) {
+    event.preventDefault();
+    setPasswordError(null);
+    if (c.gate === "setup" && password !== confirmPassword) {
+      setPasswordError(t.mismatch);
+      passwordInput.current?.focus();
+      return;
+    }
+    if (c.gate === "setup") await c.bootstrap(password);
+    else await c.login(password);
+  }
+  async function createFile() {
+    if (!selected) return;
+    const job = await c.create(selected.choice_id, keep, consent);
+    if (job) window.setTimeout(() => activeHeading.current?.focus(), 0);
+  }
+  function prepareRetry(job: Job) {
+    c.prepareRetry(job);
+    setMode(job.output.kind === "mp4" ? "mp4" : "mp3");
+    setUseOriginal(job.output.kind === "original_audio");
+    setConsentFor(null);
+    focusUrl();
+  }
+  function historyQuery(
+    overrides: {
+      search?: string;
+      format?: "" | Kind;
+      status?: string;
+      file_state?: string;
+      offset?: number;
+    } = {},
+  ) {
+    void c.loadHistory({
+      search: c.historyQuery,
+      format: c.historyFormat,
+      status: c.historyStatus,
+      file_state: c.historyFileState,
+      offset: 0,
+      ...overrides,
+    });
+  }
+  const renderJob = (job: Job) => (
+    <JobCard
+      key={job.id}
+      job={job}
+      locale={locale}
+      error={c.errors.jobs[job.id]}
+      pending={c.pendingJobs}
+      onAction={(action, id, retain) => void c.mutateJob(action, id, retain)}
+      onRetry={prepareRetry}
+      onDownload={(value) => void c.download(value)}
+    />
+  );
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-6 px-4 py-6 sm:px-6">
-      <header className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <span className="bg-primary text-primary-fg grid size-11 place-items-center rounded-md" aria-hidden="true">
-            <Archive className="size-5" />
+    <main className="seorap-shell">
+      <a className="skip-link" href="#main-task">
+        {t.urlLabel}
+      </a>
+      <header className="app-header">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">
+            <Archive />
           </span>
           <div>
-            <p className="text-lg font-semibold leading-tight">{t.name}</p>
-            <p className="text-muted text-sm">{t.tagline}</p>
+            <h1>{t.name}</h1>
+            <p>{t.tagline}</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <button type="button" className="border-border bg-surface size-11 rounded-md border" aria-label={t.language} onClick={() => switchLocale(locale === "ko" ? "en" : "ko")}>
-            <Languages className="mx-auto size-5" />
-          </button>
-          <button type="button" className="border-border bg-surface size-11 rounded-md border" aria-label={t.theme} onClick={() => cycleTheme()}>
-            {theme === "dark" ? <Moon className="mx-auto size-5" /> : <Sun className="mx-auto size-5" />}
-          </button>
-          {gate === "ready" && session?.authenticated && session.password_required !== false ? (
-            <button type="button" className="border-border bg-surface hidden h-11 rounded-md border px-3 text-sm sm:inline" onClick={() => void logout()}>
-              {t.logout}
+        <div className="header-actions">
+          <SettingsDialog
+            locale={locale}
+            theme={theme}
+            settings={settings}
+            ready={ready}
+            busy={c.preferencesBusy}
+            error={c.errors.preferences}
+            diagnosticsError={c.errors.diagnostics}
+            diagnosticsValue={c.diagnosticsValue}
+            onSave={(values) => void c.savePreferences(values)}
+            onDiagnostics={() => void c.diagnostics()}
+            diagnosticsBusy={c.diagnosticsBusy}
+            processingReady={c.processingReady}
+          />
+          {ready && c.session?.password_required !== false ? (
+            <button
+              className="button secondary compact"
+              type="button"
+              disabled={c.authBusy}
+              onClick={() => void c.logout()}
+            >
+              <LogOut className="icon" aria-hidden="true" />
+              <span>{c.authBusy ? t.signingOut : t.logout}</span>
             </button>
           ) : null}
         </div>
       </header>
-
-      <p className="border-border bg-surface text-muted rounded-md border px-4 py-3 text-sm leading-relaxed">
-        {t.notice}{" "}
-        <a className="text-fg underline" href="https://www.youtube.com/static?template=terms">
-          {t.terms}
-        </a>
-        {" · "}
-        <a className="text-fg underline" href="https://support.google.com/youtube/answer/56100?hl=en">
-          {t.ownUploads}
-        </a>
-      </p>
-
-      {settings?.capabilities.demo_data ? (
-        <p className="bg-warn text-primary-fg rounded-md px-4 py-2 text-sm font-medium">{t.demo}</p>
-      ) : null}
-
-      {gate === "boot" ? <p className="text-muted">{t.checking}</p> : null}
-      {gate === "offline" ? (
-        <section className="border-border bg-surface rounded-md border p-5" role="status">
-          <h1 className="text-xl font-semibold">{t.offlineTitle}</h1>
-          <p className="text-muted mt-2 text-sm leading-relaxed">{t.offlineBody}</p>
+      {ready ? <ErrorNotice error={c.errors.auth} locale={locale} /> : null}
+      {c.gate === "boot" ? (
+        <section className="gate-card" id="main-task" aria-busy="true">
+          <BusyLabel busy>{t.checking}</BusyLabel>
         </section>
       ) : null}
-      {gate === "setup" || gate === "login" ? (
-        <form className="border-border bg-surface grid gap-3 rounded-md border p-5" onSubmit={gate === "setup" ? onSetup : onLogin}>
-          <h1 className="text-xl font-semibold">{gate === "setup" ? t.setupTitle : t.loginTitle}</h1>
-          <p className="text-muted text-sm">{gate === "setup" ? t.setupBody : null}</p>
-          <label className="grid gap-1 text-sm">
-            {t.password}
-            <input className="border-border bg-bg h-11 rounded-md border px-3" type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={10} />
-          </label>
-          {gate === "setup" ? (
-            <label className="grid gap-1 text-sm">
-              {t.confirm}
-              <input className="border-border bg-bg h-11 rounded-md border px-3" type="password" autoComplete="new-password" value={confirm} onChange={(event) => setConfirm(event.target.value)} required minLength={10} />
-            </label>
-          ) : null}
-          {formError ? <p className="text-danger text-sm" role="alert">{formError}</p> : null}
-          <button className="bg-primary text-primary-fg h-11 rounded-md font-medium" type="submit" disabled={busy}>
-            {gate === "setup" ? t.savePassword : t.login}
+      {c.gate === "offline" ? (
+        <section className="gate-card" id="main-task">
+          <h2>{t.offlineTitle}</h2>
+          <p className="muted">{t.offlineBody}</p>
+          <ErrorNotice error={c.errors.connection} locale={locale} />
+          <button
+            className="button primary"
+            type="button"
+            disabled={c.authBusy}
+            onClick={() => void c.retryConnection()}
+          >
+            <BusyLabel busy={c.authBusy}>{t.checkAgain}</BusyLabel>
           </button>
-        </form>
+        </section>
       ) : null}
-
-      {gate === "ready" ? (
+      {c.gate === "login" || c.gate === "setup" ? (
+        <section className="gate-card" id="main-task">
+          <span className="section-eyebrow">
+            <ShieldCheck className="icon" aria-hidden="true" />
+            {t.name}
+          </span>
+          <h2>{c.gate === "login" ? t.loginTitle : t.setupTitle}</h2>
+          <p className="muted">{c.gate === "login" ? t.loginBody : t.setupBody}</p>
+          {c.gate === "setup" && !setupAllowed ? (
+            <div className="cli-setup">
+              <p>{t.cliSetup}</p>
+              <code>docker compose exec app python -m app.cli bootstrap</code>
+              <p className="small muted">{t.cliNext}</p>
+              <button
+                className="button primary"
+                type="button"
+                disabled={c.authBusy}
+                onClick={() => void c.retryConnection()}
+              >
+                <BusyLabel busy={c.authBusy}>{t.checkAgain}</BusyLabel>
+              </button>
+            </div>
+          ) : (
+            <form
+              className="auth-form"
+              onSubmit={(event) => void submitAuth(event)}
+              aria-busy={c.authBusy}
+            >
+              <label className="field" htmlFor="local-password">
+                <span>{t.password}</span>
+                <input
+                  id="local-password"
+                  name="password"
+                  ref={passwordInput}
+                  type="password"
+                  autoComplete={c.gate === "setup" ? "new-password" : "current-password"}
+                  minLength={c.gate === "setup" ? 10 : undefined}
+                  required
+                  value={password}
+                  onChange={(event) => {
+                    setPassword(event.target.value);
+                    setPasswordError(null);
+                    c.clearError("auth");
+                  }}
+                  aria-invalid={Boolean(passwordError || c.errors.auth)}
+                  aria-describedby={`${c.gate === "setup" ? "password-hint " : ""}auth-error`}
+                />
+              </label>
+              {c.gate === "setup" ? (
+                <>
+                  <p className="small muted" id="password-hint">
+                    {t.passwordHint}
+                  </p>
+                  <label className="field" htmlFor="confirm-password">
+                    <span>{t.confirm}</span>
+                    <input
+                      id="confirm-password"
+                      name="confirm-password"
+                      type="password"
+                      autoComplete="new-password"
+                      minLength={10}
+                      required
+                      value={confirmPassword}
+                      onChange={(event) => setConfirmPassword(event.target.value)}
+                    />
+                  </label>
+                </>
+              ) : null}
+              <div id="auth-error">
+                {passwordError ? (
+                  <p className="error-note" role="alert">
+                    {passwordError}
+                  </p>
+                ) : null}
+                <ErrorNotice error={c.errors.auth} locale={locale} />
+              </div>
+              <button className="button primary" type="submit" disabled={c.authBusy}>
+                <BusyLabel busy={c.authBusy}>
+                  {c.authBusy
+                    ? c.gate === "login"
+                      ? t.signingIn
+                      : t.saving
+                    : c.gate === "login"
+                      ? t.login
+                      : t.savePassword}
+                </BusyLabel>
+              </button>
+            </form>
+          )}
+        </section>
+      ) : null}
+      {ready ? (
         <>
-          <form className="grid gap-3" onSubmit={onAnalyze}>
-            <label className="grid gap-2 text-sm font-medium" htmlFor="video-url">
-              {t.urlLabel}
-              <input
-                id="video-url"
-                className="border-border bg-surface h-12 rounded-md border px-3 text-base"
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="https://www.youtube.com/watch?v="
-                inputMode="url"
-                autoCapitalize="off"
-                autoCorrect="off"
-                spellCheck={false}
-                required
-              />
-            </label>
-            <p className="text-muted text-sm">{t.urlHint}</p>
-            {urlError ? <p className="text-danger text-sm" role="alert">{urlError}</p> : null}
-            {parentId ? (
-              <p className="border-border bg-surface flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
-                <span>{t.retryHint}</span>
-                <button type="button" className="underline" onClick={() => setParentId(null)}>
-                  {t.clearRetry}
+          <section className="download-workspace" id="main-task" aria-labelledby="task-title">
+            <div className="workspace-intro">
+              <p className="section-eyebrow">YouTube → MP4 / MP3</p>
+              <h2 id="task-title">{t.headline}</h2>
+              <p className="muted">{t.intro}</p>
+            </div>
+            {settings?.capabilities.demo_data ? (
+              <p className="info-note test-note">{t.demo}</p>
+            ) : null}
+            {c.processingReady === false ? (
+              <div className="info-note">
+                <p>{t.processorUnavailable}</p>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => void c.refreshStorage()}
+                >
+                  {t.checkAgain}
                 </button>
+              </div>
+            ) : null}
+            {c.cooldownSeconds > 0 ? (
+              <p className="info-note numeric" role="status">
+                {t.retryAfter} {c.cooldownSeconds} {t.seconds}
               </p>
             ) : null}
-            <div className="flex gap-2">
-              <button className="bg-primary text-primary-fg h-11 flex-1 rounded-md font-medium" type="submit" disabled={busy}>
-                {busy ? t.creating : t.analyze}
-              </button>
-              <button
-                className="border-border bg-surface h-11 rounded-md border px-3"
-                type="button"
-                aria-label={t.paste}
-                onClick={() => {
-                  navigator.clipboard?.readText().then((text) => setUrl(text)).catch(() => undefined);
-                }}
-              >
-                <ClipboardPaste className="size-5" />
-              </button>
-            </div>
-          </form>
-
-          {analysis ? (
-            <section className="border-border bg-surface grid gap-4 rounded-md border p-4" aria-label={t.metadata}>
-              <div className="flex gap-4">
-                <div className="bg-bg grid h-24 w-40 shrink-0 place-items-center overflow-hidden rounded-md">
-                  {analysis.source.thumbnail_url ? (
-                    <img src={analysis.source.thumbnail_url} alt="" className="h-full w-full object-cover" />
-                  ) : (
-                    <span className="text-muted px-2 text-center text-xs">{t.noThumb}</span>
-                  )}
-                </div>
-                <div className="min-w-0">
-                  <h2 className="text-lg font-semibold leading-snug">{analysis.source.title}</h2>
-                  <p className="text-muted mt-1 text-sm">{analysis.source.channel}</p>
-                  <p className="mt-1 text-sm">{formatDuration(analysis.source.duration_seconds)}</p>
-                  <a className="mt-1 inline-block text-sm underline" href={analysis.source.canonical_url}>
-                    {t.source}
-                  </a>
-                </div>
-              </div>
-              {analysis.source.ignored_timestamp ? <p className="text-muted text-sm">{t.timestamp}</p> : null}
-              {analysis.source.ignored_playlist ? <p className="text-muted text-sm">{t.playlistIgnored}</p> : null}
-              <div className="grid grid-cols-3 gap-2" role="tablist">
-                {(["mp4", "mp3", "original_audio"] as const).map((kind) => (
-                  <button
-                    key={kind}
-                    type="button"
-                    role="tab"
-                    aria-selected={tab === kind}
-                    className={`h-11 rounded-md border text-sm ${tab === kind ? "bg-primary text-primary-fg border-primary" : "border-border bg-bg"}`}
-                    onClick={() => {
-                      setTab(kind);
-                      const next = analysis.choices.find((item) => item.kind === kind && item.is_default) || analysis.choices.find((item) => item.kind === kind);
-                      setChoiceId(next?.choice_id || null);
-                      setConsent(false);
-                    }}
-                  >
-                    {kind === "mp4" ? t.tabMp4 : kind === "mp3" ? t.tabMp3 : t.tabOriginal}
-                  </button>
-                ))}
-              </div>
-              {choices.length === 0 ? <p className="text-muted text-sm">{t.noChoice}</p> : null}
-              <div className="grid gap-2" role="radiogroup" aria-label={t.confirmLabel}>
-                {choices.map((choice) => (
-                  <label key={choice.choice_id} className="border-border bg-bg grid gap-1 rounded-md border px-3 py-3 text-sm">
-                    <span className="flex items-center gap-2 font-medium">
-                      <input
-                        type="radio"
-                        name="choice"
-                        checked={choiceId === choice.choice_id}
-                        onChange={() => {
-                          setChoiceId(choice.choice_id);
-                          setConsent(false);
-                        }}
-                      />
-                      {choice.label}
-                      {choice.portrait ? <span className="text-muted font-normal">{t.portrait}</span> : null}
-                    </span>
-                    <span className="text-muted">
-                      {[choice.resolution_label, choice.width && choice.height ? `${choice.width}×${choice.height}` : null, choice.vcodec, choice.acodec, choice.fps ? `${choice.fps} fps` : null]
-                        .filter(Boolean)
-                        .join(" · ")}
-                      {choice.audio_language ? ` · ${choice.audio_language}` : ""}
-                      {choice.audio_role ? ` · ${t.role[choice.audio_role as "original"] || choice.audio_role}` : ""}
-                      {choice.estimated_bytes != null ? ` · ${choice.size_is_estimate ? t.estimate + " " : ""}${formatBytes(choice.estimated_bytes)}` : ""}
-                    </span>
-                  </label>
-                ))}
-              </div>
-              <details className="text-sm">
-                <summary className="cursor-pointer">{t.details}</summary>
-                <p className="text-muted mt-2 leading-relaxed">{tab === "mp3" ? t.bitrateNote : tab === "original_audio" ? t.originalNote : t.conversionNote}</p>
-              </details>
-              {selected ? (
-                <p className="text-sm">
-                  <span className="font-medium">{t.confirmLabel}: </span>
-                  {selected.label}. {selected.conversion_required || selected.kind === "mp3" ? t.convert : t.copy}
-                </p>
-              ) : null}
-              {selected?.requires_consent ? (
-                <label className="flex items-start gap-2 text-sm">
-                  <input type="checkbox" className="mt-1" checked={consent} onChange={(event) => setConsent(event.target.checked)} />
-                  {t.consent}
-                </label>
-              ) : null}
-              <label className="flex items-start gap-2 text-sm">
-                <input type="checkbox" className="mt-1" checked={keep} onChange={(event) => setKeep(event.target.checked)} />
-                <span>
-                  {t.keep}
-                  <span className="text-muted block">{t.keepHint}</span>
-                  {settings ? (
-                    <span className="text-muted block">
-                      {t.quota}: {formatBytes(settings.capabilities.storage_used_bytes)} / {formatBytes(settings.capabilities.storage_limit_bytes)}
-                    </span>
-                  ) : null}
-                </span>
-              </label>
-              <button className="bg-primary text-primary-fg h-11 rounded-md font-medium" type="button" disabled={!selected || busy || (selected.requires_consent && !consent)} onClick={() => void onCreate()}>
-                {t.create}
-              </button>
-            </section>
-          ) : null}
-
-          <section className="grid gap-3" aria-live="polite">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">{t.jobs}</h2>
-              <span className="text-muted text-xs">{live === "live" ? t.live : t.polling}</span>
-            </div>
-            {active.length === 0 ? <p className="text-muted text-sm">{t.emptyJobs}</p> : active.map((job) => <JobCard key={job.id} job={job} locale={locale} onChange={() => void refreshJobs()} csrf={csrf} onRetry={beginRetry} />)}
-          </section>
-          <section className="grid gap-3">
-            <h2 className="text-lg font-semibold">{t.history}</h2>
-            {history.length === 0 ? <p className="text-muted text-sm">{t.emptyHistory}</p> : history.map((job) => <JobCard key={job.id} job={job} locale={locale} onChange={() => void refreshJobs()} csrf={csrf} onRetry={beginRetry} />)}
-          </section>
-          {settings?.capabilities.playlists_enabled ? (
-            <section className="border-border bg-surface grid gap-3 rounded-md border p-4">
-              <h2 className="text-lg font-semibold">{t.playlistTitle}</h2>
-              <p className="text-muted text-sm leading-relaxed">{t.playlistHint}</p>
+            <Tabs.Root
+              value={mode}
+              onValueChange={(value) => {
+                setMode(value as Mode);
+                setConsentFor(null);
+              }}
+              className="mode-tabs"
+            >
+              <Tabs.List className="mode-list" aria-label={t.selection}>
+                <Tabs.Trigger className="mode-tab" value="mp4">
+                  <Film className="icon" aria-hidden="true" />
+                  {t.tabMp4}
+                </Tabs.Trigger>
+                <Tabs.Trigger className="mode-tab" value="mp3">
+                  <Headphones className="icon" aria-hidden="true" />
+                  {t.tabMp3}
+                </Tabs.Trigger>
+              </Tabs.List>
               <form
-                className="flex gap-2"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  setPlaylistError(null);
-                  setBusy(true);
-                  api
-                    .playlist(csrf, locale, playlistUrl.trim())
-                    .then(setPlaylist)
-                    .catch((error) => setPlaylistError(messageOf(error)))
-                    .finally(() => setBusy(false));
-                }}
+                className="url-form"
+                onSubmit={(event) => void analyzeUrl(event)}
+                aria-busy={c.analysisBusy}
               >
-                <input
-                  className="border-border bg-bg h-11 flex-1 rounded-md border px-3"
-                  value={playlistUrl}
-                  onChange={(event) => setPlaylistUrl(event.target.value)}
-                  placeholder="https://www.youtube.com/playlist?list="
-                  aria-label={t.playlistTitle}
-                />
-                <button className="bg-primary text-primary-fg h-11 rounded-md px-3 text-sm" type="submit" disabled={busy}>
-                  {t.analyze}
-                </button>
+                <label className="field" htmlFor="video-url">
+                  <span>{t.urlLabel}</span>
+                  <div className="url-input-wrap">
+                    <Link className="icon" aria-hidden="true" />
+                    <input
+                      ref={urlInput}
+                      id="video-url"
+                      name="video-url"
+                      type="url"
+                      inputMode="url"
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="https://www.youtube.com/watch?v=…"
+                      value={c.url}
+                      required
+                      aria-describedby="url-hint url-feedback"
+                      aria-invalid={Boolean(c.errors.analyze)}
+                      onChange={(event) => {
+                        c.setUrl(event.target.value);
+                        setConsentFor(null);
+                        setClipboardNotice(null);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="icon-button"
+                      disabled={!c.url}
+                      onClick={() => {
+                        c.setUrl("");
+                        setConsentFor(null);
+                        setClipboardNotice(null);
+                        focusUrl();
+                      }}
+                      aria-label={t.clear}
+                    >
+                      <X className="icon" aria-hidden="true" />
+                    </button>
+                  </div>
+                </label>
+                <div className="url-actions">
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={() => void pasteUrl()}
+                  >
+                    <ClipboardPaste className="icon" aria-hidden="true" />
+                    {t.paste}
+                  </button>
+                  <button
+                    type="submit"
+                    className="button primary"
+                    disabled={c.analysisBusy || c.submitting || c.cooldownSeconds > 0}
+                  >
+                    <BusyLabel busy={c.analysisBusy}>
+                      {c.analysisBusy ? t.analyzing : t.analyze}
+                    </BusyLabel>
+                    {!c.analysisBusy ? <ArrowRight className="icon" aria-hidden="true" /> : null}
+                  </button>
+                </div>
+                <p id="url-hint" className="small muted">
+                  {t.urlHint}
+                </p>
+                <div id="url-feedback">
+                  {clipboardNotice ? (
+                    <p className="small muted" role="status">
+                      {clipboardNotice}
+                    </p>
+                  ) : null}
+                  <ErrorNotice
+                    error={c.errors.analyze}
+                    locale={locale}
+                    onRetry={() => void analyzeUrl()}
+                    retryLabel={t.reanalyze}
+                  />
+                </div>
+                {c.analysisBusy ? (
+                  <div className="small muted">
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => c.cancelAnalysis()}
+                    >
+                      {t.cancelAnalysis}
+                    </button>
+                    <p>{t.cancelAnalysisHint}</p>
+                  </div>
+                ) : null}
               </form>
-              {playlistError ? <p className="text-danger text-sm" role="alert">{playlistError}</p> : null}
-              {playlist?.limited ? <p className="text-muted text-sm">{t.playlistLimited}</p> : null}
-              <ul className="grid gap-2">
-                {playlist?.entries.map((entry) => (
-                  <li key={entry.position} className="border-border bg-bg flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
-                    <span className="min-w-0">
-                      <span className="text-muted mr-2">{entry.position}</span>
-                      {entry.title || t.unknown}
-                      {!entry.available ? <span className="text-danger ml-2">{entry.reason || t.playlistUnavailable}</span> : null}
-                    </span>
-                    {entry.available && entry.canonical_url ? (
+              {c.parentId ? (
+                <div className="info-note">
+                  <p>{t.retryHint}</p>
+                  <button type="button" className="text-button" onClick={c.clearRetry}>
+                    {t.clearRetry}
+                  </button>
+                </div>
+              ) : null}
+              {analysis ? (
+                <div className="analysis-result" key={analysis.analysis_id}>
+                  <div className="source-card">
+                    <div className="source-thumbnail">
+                      {analysis.source.thumbnail_url && !thumbnailFailed ? (
+                        <img
+                          src={analysis.source.thumbnail_url}
+                          alt=""
+                          loading="lazy"
+                          onError={() => setThumbnailFailed(true)}
+                        />
+                      ) : (
+                        <span>
+                          <Film className="icon" aria-hidden="true" />
+                          {t.noThumb}
+                        </span>
+                      )}
+                      <span className="thumbnail-duration numeric">
+                        {formatDuration(analysis.source.duration_seconds)}
+                      </span>
+                    </div>
+                    <div className="source-copy">
+                      <p className="section-eyebrow">{t.metadata}</p>
+                      <h3 ref={analysisHeading} tabIndex={-1}>
+                        {analysis.source.title}
+                      </h3>
+                      <p className="muted small">{analysis.source.channel || t.unknown}</p>
+                      <a
+                        className="text-link small"
+                        href={analysis.source.canonical_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {t.source} ↗
+                      </a>
+                      <p className="source-id small muted">
+                        {t.sourceIdentity}: {analysis.source.video_id}
+                      </p>
+                    </div>
+                  </div>
+                  {analysis.source.ignored_timestamp ? (
+                    <p className="small muted">{t.timestamp}</p>
+                  ) : null}
+                  {analysis.source.ignored_playlist ? (
+                    <p className="small muted">{t.playlistIgnored}</p>
+                  ) : null}
+                  {(["mp4", "mp3"] as const).map((panelMode) => (
+                    <Tabs.Content
+                      key={panelMode}
+                      value={panelMode}
+                      className="choice-panel"
+                      aria-label={panelMode === "mp4" ? t.tabMp4 : t.tabMp3}
+                    >
+                      <div className="choice-topline">
+                        <h4>{t.confirmLabel}</h4>
+                        <span className="small muted">
+                          {kind === "mp3"
+                            ? t.audioEncoding
+                            : kind === "original_audio"
+                              ? t.tabOriginal
+                              : t.tabMp4}
+                        </span>
+                      </div>
+                      {choices.length ? (
+                        <label className="field" htmlFor={`quality-${panelMode}`}>
+                          <span className="small muted">{t.quality}</span>
+                          <select
+                            id={`quality-${panelMode}`}
+                            value={selected?.choice_id || ""}
+                            onChange={(event) => selectChoice(event.target.value)}
+                            aria-describedby={`choice-facts-${panelMode}`}
+                          >
+                            <option value="" disabled>
+                              {t.selection}
+                            </option>
+                            {choices.map((choice) => (
+                              <option key={choice.choice_id} value={choice.choice_id}>
+                                {choiceLabel(choice, locale)}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : (
+                        <p className="info-note">{t.noChoice}</p>
+                      )}
+                      {selected ? (
+                        <div className="selected-output" id={`choice-facts-${panelMode}`}>
+                          <strong>{outputSummary(selected, locale)}</strong>
+                          <span className="small muted">
+                            {selected.kind === "mp3"
+                              ? t.audioEncoding
+                              : selected.conversion_required
+                                ? t.convert
+                                : t.copy}
+                          </span>
+                          <span className="small numeric">
+                            {t.outputSize}:{" "}
+                            {(selected.estimated_output_bytes !== undefined
+                              ? selected.estimated_output_bytes
+                              : selected.estimated_bytes) == null
+                              ? t.unknown
+                              : `${selected.output_size_provenance === "exact" ? `${t.exact} ` : `${t.estimate} `}${formatBytes(selected.estimated_output_bytes !== undefined ? selected.estimated_output_bytes : selected.estimated_bytes)}`}
+                          </span>
+                          {selected.audio_language ? (
+                            <span className="small muted">
+                              {t.audioLanguage}: {selected.audio_language}
+                              {selected.audio_role && selected.audio_role in t.role
+                                ? ` · ${t.role[selected.audio_role as keyof typeof t.role]}`
+                                : ""}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {panelMode === "mp3" ? (
+                        <p className="small muted">
+                          {kind === "original_audio" ? t.originalNote : t.bitrateNote}
+                        </p>
+                      ) : null}
+                      <details className="advanced-options">
+                        <summary>{t.advanced}</summary>
+                        <div className="advanced-content">
+                          {panelMode === "mp4" ? (
+                            settings?.capabilities.transcoding_enabled ? (
+                              <label className="check-label">
+                                <input
+                                  type="checkbox"
+                                  checked={showConversion}
+                                  onChange={(event) => {
+                                    setShowConversion(event.target.checked);
+                                    setConsentFor(null);
+                                  }}
+                                />
+                                <span>
+                                  {t.conversionOption}
+                                  <span className="small muted">{t.conversionNote}</span>
+                                </span>
+                              </label>
+                            ) : (
+                              <p className="small muted">{t.conversionUnavailable}</p>
+                            )
+                          ) : (
+                            <label className="check-label">
+                              <input
+                                type="checkbox"
+                                checked={useOriginal}
+                                disabled={
+                                  !analysis.choices.some(
+                                    (choice) => choice.kind === "original_audio",
+                                  )
+                                }
+                                onChange={(event) => {
+                                  setUseOriginal(event.target.checked);
+                                  setConsentFor(null);
+                                }}
+                              />
+                              <span>
+                                {t.originalOption}
+                                <span className="small muted">{t.originalNote}</span>
+                              </span>
+                            </label>
+                          )}
+                          {selected ? (
+                            <dl className="fact-list small">
+                              <div>
+                                <dt>{t.details}</dt>
+                                <dd>
+                                  {[
+                                    selected.container.toUpperCase(),
+                                    selected.vcodec,
+                                    selected.acodec,
+                                    selected.width && selected.height
+                                      ? `${selected.width}×${selected.height}`
+                                      : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" · ")}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>{t.inputSize}</dt>
+                                <dd>
+                                  {selected.input_bytes == null
+                                    ? t.unknown
+                                    : `${selected.input_size_provenance === "exact" ? t.exact : t.estimate} ${formatBytes(selected.input_bytes)}`}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>{t.workspaceBudget}</dt>
+                                <dd>
+                                  {selected.expected_workspace_bytes == null
+                                    ? t.unknown
+                                    : `${t.estimate} ${formatBytes(selected.expected_workspace_bytes)}`}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>{t.analysisExpires}</dt>
+                                <dd>{formatDate(analysis.expires_at, locale)}</dd>
+                              </div>
+                            </dl>
+                          ) : null}
+                          <details className="technical-details">
+                            <summary>
+                              {t.allFormats} ({allModeChoices.length})
+                            </summary>
+                            <ul className="format-list">
+                              {allModeChoices.map((choice) => (
+                                <li key={choice.choice_id}>
+                                  <span>{choiceLabel(choice, locale)}</span>
+                                  <span className="small muted">
+                                    {[
+                                      choice.vcodec,
+                                      choice.acodec,
+                                      choice.estimated_bytes == null
+                                        ? t.unknown
+                                        : `${choice.size_is_estimate ? `${t.estimate} ` : ""}${formatBytes(choice.estimated_bytes)}`,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" · ")}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        </div>
+                      </details>
+                      {selected?.requires_consent ? (
+                        <label className="check-label consent-label">
+                          <input
+                            type="checkbox"
+                            checked={consent}
+                            onChange={(event) =>
+                              setConsentFor(event.target.checked ? consentKey : null)
+                            }
+                          />
+                          <span>
+                            {t.consent}
+                            <span className="small muted">{t.conversionNote}</span>
+                          </span>
+                        </label>
+                      ) : null}
+                      <label className="check-label">
+                        <input
+                          type="checkbox"
+                          checked={keep}
+                          onChange={(event) => setKeep(event.target.checked)}
+                        />
+                        <span>
+                          {t.keep}
+                          <span className="small muted">{t.keepHint}</span>
+                        </span>
+                      </label>
+                      {c.analysisExpired ? (
+                        <div className="info-note">
+                          <p>{t.expiredAnalysis}</p>
+                          <button
+                            className="text-button"
+                            type="button"
+                            onClick={() => void analyzeUrl()}
+                          >
+                            {t.reanalyze}
+                          </button>
+                        </div>
+                      ) : null}
+                      <ErrorNotice
+                        error={c.errors.create}
+                        locale={locale}
+                        onRetry={
+                          c.errors.create?.code === "ANALYSIS_EXPIRED" ||
+                          c.errors.create?.code === "FORMAT_CHANGED"
+                            ? () => void analyzeUrl()
+                            : undefined
+                        }
+                        retryLabel={t.reanalyze}
+                      />
+                      <button
+                        className="button primary create-button"
+                        type="button"
+                        disabled={
+                          !selected ||
+                          c.submitting ||
+                          c.analysisBusy ||
+                          c.cooldownSeconds > 0 ||
+                          c.analysisExpired ||
+                          Boolean(c.pendingIntent) ||
+                          Boolean(selected?.requires_consent && !consent)
+                        }
+                        onClick={() => void createFile()}
+                      >
+                        <BusyLabel busy={c.submitting}>
+                          {c.submitting
+                            ? t.creating
+                            : kind === "mp4"
+                              ? t.createMp4
+                              : kind === "mp3"
+                                ? t.createMp3
+                                : t.createOriginal}
+                        </BusyLabel>
+                      </button>
+                    </Tabs.Content>
+                  ))}
+                </div>
+              ) : (
+                <>
+                  {(["mp4", "mp3"] as const).map((panelMode) => (
+                    <Tabs.Content
+                      key={panelMode}
+                      value={panelMode}
+                      className="mode-description small muted"
+                    >
+                      {panelMode === "mp4"
+                        ? `${t.tabMp4} · H.264 / AAC`
+                        : `${t.tabMp3} · ${settings?.mp3_bitrate || 192} kbps`}
+                    </Tabs.Content>
+                  ))}
+                </>
+              )}
+            </Tabs.Root>
+            {c.pendingIntent ? (
+              <div className="info-note uncertain-note">
+                <p>{t.uncertain}</p>
+                {!analysis ? <ErrorNotice error={c.errors.create} locale={locale} /> : null}
+                <div className="job-actions">
+                  <button
+                    type="button"
+                    className="button primary"
+                    disabled={c.submitting || c.cooldownSeconds > 0}
+                    onClick={() => void c.replaySubmission()}
+                  >
+                    <BusyLabel busy={c.submitting}>{t.replay}</BusyLabel>
+                  </button>
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => setDiscardWarning(true)}
+                  >
+                    {t.discard}
+                  </button>
+                </div>
+                {discardWarning ? (
+                  <div>
+                    <p className="small">{t.discardWarning}</p>
+                    <div className="job-actions">
                       <button
                         type="button"
-                        className="shrink-0 underline"
+                        className="button secondary"
                         onClick={() => {
-                          setUrl(entry.canonical_url || "");
-                          setParentId(null);
-                          setAnalysis(null);
+                          c.discardSubmission();
+                          setDiscardWarning(false);
                         }}
                       >
-                        {t.playlistUse}
+                        {t.discard}
                       </button>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
-          <button type="button" className="text-muted text-left text-sm underline" onClick={() => void showDiag()}>
-            {t.diagnostics}
-          </button>
-          {diag ? (
-            <pre className="border-border bg-surface overflow-auto rounded-md border p-3 text-xs">{diag}</pre>
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => setDiscardWarning(false)}
+                      >
+                        {t.back}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+          <section className="jobs-section" aria-labelledby="active-title">
+            <div className="section-heading">
+              <h2 id="active-title" ref={activeHeading} tabIndex={-1}>
+                {t.jobs} <span className="count">{c.active.length}</span>
+              </h2>
+              <span className="connection-state small" role="status">
+                <span className={`connection-dot ${c.live === "live" ? "is-live" : ""}`} />
+                {t[c.live]}
+              </span>
+            </div>
+            <ErrorNotice
+              error={c.errors.connection}
+              locale={locale}
+              onRetry={() => void c.retryConnection()}
+            />
+            {c.active.length ? (
+              <div className="job-list">{c.active.map(renderJob)}</div>
+            ) : (
+              <p className="empty-state">{t.emptyJobs}</p>
+            )}
+          </section>
+          <section className="history-section" aria-labelledby="history-title">
+            <div className="section-heading">
+              <h2 id="history-title">
+                {t.history} <span className="count">{c.historyTotal}</span>
+              </h2>
+              <button
+                className="text-button small"
+                type="button"
+                disabled={c.historyLoading}
+                onClick={() => historyQuery({ offset: c.historyOffset })}
+              >
+                {t.refresh}
+              </button>
+            </div>
+            <form
+              className="history-search"
+              onSubmit={(event) => {
+                event.preventDefault();
+                historyQuery({ search: historySearch });
+              }}
+            >
+              <label className="field" htmlFor="history-search">
+                <span className="sr-only">{t.search}</span>
+                <div className="url-input-wrap">
+                  <Search className="icon" aria-hidden="true" />
+                  <input
+                    id="history-search"
+                    type="search"
+                    value={historySearch}
+                    onChange={(event) => setHistorySearch(event.target.value)}
+                    placeholder={t.search}
+                  />
+                </div>
+              </label>
+              <button type="submit" className="button secondary" disabled={c.historyLoading}>
+                {t.searchAction}
+              </button>
+            </form>
+            <div className="history-filters">
+              <label className="field">
+                <span className="small muted">{t.formatFilter}</span>
+                <select
+                  value={c.historyFormat}
+                  onChange={(event) => historyQuery({ format: event.target.value as "" | Kind })}
+                >
+                  <option value="">{t.all}</option>
+                  <option value="mp4">MP4</option>
+                  <option value="mp3">MP3</option>
+                  <option value="original_audio">{t.tabOriginal}</option>
+                </select>
+              </label>
+              <label className="field">
+                <span className="small muted">{t.statusFilter}</span>
+                <select
+                  value={c.historyStatus}
+                  onChange={(event) => historyQuery({ status: event.target.value })}
+                >
+                  <option value="">{t.all}</option>
+                  {(["succeeded", "failed", "cancelled", "interrupted"] as const).map((status) => (
+                    <option value={status} key={status}>
+                      {t.status[status]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span className="small muted">{t.fileFilter}</span>
+                <select
+                  value={c.historyFileState}
+                  onChange={(event) => historyQuery({ file_state: event.target.value })}
+                >
+                  <option value="">{t.all}</option>
+                  {(["available", "expired", "deleted", "missing", "none"] as const).map(
+                    (state) => (
+                      <option value={state} key={state}>
+                        {t.fileState[state]}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+            </div>
+            <ErrorNotice
+              error={c.errors.history}
+              locale={locale}
+              onRetry={() => historyQuery({ offset: c.historyOffset })}
+            />
+            <div aria-busy={c.historyLoading} className="job-list">
+              {c.history.length ? (
+                c.history.map(renderJob)
+              ) : (
+                <p className="empty-state">
+                  {c.historyLoading
+                    ? t.loadingHistory
+                    : historyFiltered
+                      ? t.emptySearch
+                      : t.emptyHistory}
+                </p>
+              )}
+            </div>
+            <nav className="pagination" aria-label={t.history}>
+              <button
+                type="button"
+                className="button secondary"
+                disabled={c.historyLoading || c.historyOffset === 0}
+                onClick={() =>
+                  historyQuery({ offset: Math.max(0, c.historyOffset - historyLimit) })
+                }
+              >
+                {t.previous}
+              </button>
+              <p className="small muted numeric" role="status">
+                {c.historyTotal
+                  ? `${c.historyOffset + 1}–${Math.min(c.historyOffset + c.history.length, c.historyTotal)} / ${c.historyTotal}`
+                  : `0 ${t.records}`}
+              </p>
+              <button
+                type="button"
+                className="button secondary"
+                disabled={c.historyLoading || c.historyOffset + c.history.length >= c.historyTotal}
+                onClick={() => historyQuery({ offset: c.historyOffset + historyLimit })}
+              >
+                {t.next}
+              </button>
+            </nav>
+            <p className="small muted device-note">{t.deviceNote}</p>
+          </section>
+          {settings?.capabilities.playlists_enabled ? (
+            <details className="playlist-section">
+              <summary>{t.playlistTitle}</summary>
+              <p className="small muted">{t.playlistHint}</p>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void c.inspectPlaylist(playlistUrl.trim());
+                }}
+                className="playlist-form"
+              >
+                <label className="field" htmlFor="playlist-url">
+                  <span className="small">{t.playlistUrl}</span>
+                  <input
+                    id="playlist-url"
+                    type="url"
+                    inputMode="url"
+                    required
+                    value={playlistUrl}
+                    onChange={(event) => {
+                      setPlaylistUrl(event.target.value);
+                      c.clearPlaylist();
+                    }}
+                    aria-describedby="playlist-feedback"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  className="button secondary"
+                  disabled={c.playlistBusy || c.cooldownSeconds > 0}
+                >
+                  <BusyLabel busy={c.playlistBusy}>
+                    {c.playlistBusy ? t.playlistBusy : t.playlistInspect}
+                  </BusyLabel>
+                </button>
+              </form>
+              <div id="playlist-feedback">
+                <ErrorNotice error={c.errors.playlist} locale={locale} />
+              </div>
+              {c.playlist ? (
+                <>
+                  <p className="small muted wrap-anywhere">{c.playlist.canonical_url}</p>
+                  {c.playlist.stopped_at_cap || c.playlist.limited ? (
+                    <p className="small muted">{t.playlistLimited}</p>
+                  ) : null}
+                  <ol className="playlist-entries">
+                    {c.playlist.entries.map((entry) => (
+                      <li key={entry.position}>
+                        <span className="small muted numeric">{entry.position}</span>
+                        <span className="playlist-entry-title">
+                          {entry.title || entry.video_id || t.playlistUnavailable}
+                        </span>
+                        {entry.available && entry.canonical_url ? (
+                          <button
+                            type="button"
+                            className="button secondary"
+                            onClick={() => {
+                              c.selectPlaylist(entry.canonical_url!);
+                              setConsentFor(null);
+                              focusUrl();
+                            }}
+                          >
+                            {t.playlistUse}
+                          </button>
+                        ) : (
+                          <span className="small muted">{t.playlistUnavailable}</span>
+                        )}
+                      </li>
+                    ))}
+                  </ol>
+                  {!c.playlist.entries.length ? (
+                    <p className="small muted">{t.playlistEmpty}</p>
+                  ) : null}
+                </>
+              ) : null}
+            </details>
           ) : null}
         </>
       ) : null}
+      <footer className="app-footer">
+        <p>
+          {t.notice}{" "}
+          <a
+            className="text-link"
+            href="https://www.youtube.com/static?template=terms"
+            target="_blank"
+            rel="noreferrer"
+          >
+            {t.terms}
+          </a>
+        </p>
+        <a
+          className="text-link"
+          href={`https://support.google.com/youtube/answer/56100?hl=${locale}`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {t.ownUploads} ↗
+        </a>
+      </footer>
     </main>
   );
-
-  function switchLocale(next: Locale) {
-    setLocale(next);
-    if (csrf) api.patchSettings(csrf, { language: next }).then(setSettings).catch(() => undefined);
-  }
-
-  function cycleTheme() {
-    const order = ["system", "light", "dark"] as const;
-    const next = order[(order.indexOf(theme) + 1) % order.length];
-    setTheme(next);
-    applyTheme(next);
-    if (csrf) api.patchSettings(csrf, { theme: next }).catch(() => undefined);
-  }
-
-  function beginRetry(job: Job) {
-    setParentId(job.id);
-    setUrl(job.source.canonical_url || "");
-    setAnalysis(null);
-    setUrlError(null);
-  }
-
-  async function logout() {
-    if (!csrf) return;
-    await api.logout(csrf);
-    setSession({ authenticated: false, bootstrapped: true });
-    setGate("login");
-  }
-
-  async function showDiag() {
-    if (!csrf) return;
-    const value = await api.diagnostics(csrf);
-    setDiag(JSON.stringify(value, null, 2));
-  }
-}
-
-function JobCard({ job, locale, csrf, onChange, onRetry }: { job: Job; locale: Locale; csrf: string; onChange: () => void; onRetry: (job: Job) => void }) {
-  const t = translate(locale);
-  const percent = job.progress?.percent;
-  const known = typeof percent === "number" && job.progress?.total_bytes != null && !job.progress.total_is_estimate;
-  return (
-    <article className="border-border bg-surface grid gap-2 rounded-md border p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="font-medium">{job.source.title || job.output.label}</h3>
-          <p className="text-muted text-sm">
-            {t.status[job.status]}
-            {job.phase ? ` · ${t.phase[job.phase as "downloading"] || job.phase}` : ""}
-            {job.queue_position ? ` · ${t.queue} ${job.queue_position}` : ""}
-          </p>
-        </div>
-        <p className="text-muted text-xs">{new Date(job.updated_at).toLocaleString(locale === "ko" ? "ko-KR" : "en")}</p>
-      </div>
-      {job.status === "running" || job.status === "queued" ? (
-        <div className="bg-bg h-2 overflow-hidden rounded-full" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={known ? Math.round(percent || 0) : undefined} aria-label={job.phase || job.status}>
-          <div className={known ? "bg-primary h-full" : "indeterminate h-full"} style={known ? { width: `${percent}%` } : undefined} />
-        </div>
-      ) : null}
-      {job.progress && (job.status === "running" || job.status === "queued") ? (
-        <p className="text-muted text-xs">
-          {job.progress.total_bytes == null ? t.unknownProgress : null}
-          {job.progress.speed_bps != null ? ` ${t.speed} ${formatBytes(job.progress.speed_bps)}/s` : ""}
-          {job.progress.eta_seconds != null ? ` · ${t.eta} ${formatDuration(job.progress.eta_seconds)}` : ""}
-        </p>
-      ) : null}
-      {job.cancel_requested && job.status === "running" ? <p className="text-sm">{t.cancelling}</p> : null}
-      {job.error ? (
-        <p className="text-danger text-sm" role="alert">
-          {job.error.message} {job.error.action}
-        </p>
-      ) : null}
-      <p className="text-muted text-xs">
-        {t.fileState[job.file_state]}
-        {job.artifact ? ` · ${formatBytes(job.artifact.bytes)} · ${job.keep_on_server ? t.stored : job.artifact.expires_at ? new Date(job.artifact.expires_at).toLocaleString(locale === "ko" ? "ko-KR" : "en") : ""}` : ""}
-        {job.file_state === "available" ? ` · ${t.folder}: ${t.logicalFolder}` : ""}
-      </p>
-      <div className="flex flex-wrap gap-2">
-        {job.file_state === "available" ? (
-          <a className="bg-primary text-primary-fg inline-flex h-11 items-center gap-2 rounded-md px-3 text-sm" href={`/api/v1/jobs/${job.id}/file`}>
-            <Download className="size-4" /> {t.download}
-          </a>
-        ) : null}
-        {job.status === "queued" || job.status === "running" ? (
-          <button type="button" className="border-border h-11 rounded-md border px-3 text-sm" onClick={() => void api.cancel(csrf, job.id).then(onChange)}>
-            {t.cancel}
-          </button>
-        ) : null}
-        {job.file_state === "available" ? (
-          <button type="button" className="border-border h-11 rounded-md border px-3 text-sm" onClick={() => void api.retention(csrf, job.id, !job.keep_on_server).then(onChange)}>
-            {job.keep_on_server ? t.expire : t.keep}
-          </button>
-        ) : null}
-        {job.file_state === "available" ? (
-          <button type="button" className="border-border h-11 rounded-md border px-3 text-sm" onClick={() => void api.deleteFile(csrf, job.id).then(onChange)}>
-            {t.deleteFile}
-          </button>
-        ) : null}
-        {job.status !== "queued" && job.status !== "running" ? (
-          <button type="button" className="border-border h-11 rounded-md border px-3 text-sm" onClick={() => onRetry(job)}>
-            {t.retry}
-          </button>
-        ) : null}
-        {job.file_state !== "available" && job.status !== "queued" && job.status !== "running" ? (
-          <button type="button" className="border-border h-11 rounded-md border px-3 text-sm" onClick={() => void api.deleteHistory(csrf, job.id).then(onChange)}>
-            {t.deleteHistory}
-          </button>
-        ) : null}
-      </div>
-      {job.status === "running" ? <LoaderCircle className="text-muted size-4 animate-spin" aria-hidden="true" /> : null}
-    </article>
-  );
-}
-
-function messageOf(error: unknown): string {
-  if (error && typeof error === "object" && "body" in error) {
-    const body = (error as { body?: { error?: { message?: string; action?: string } } }).body;
-    if (body?.error?.message) return `${body.error.message} ${body.error.action || ""}`.trim();
-  }
-  if (error instanceof Error) return error.message;
-  return "Error";
 }

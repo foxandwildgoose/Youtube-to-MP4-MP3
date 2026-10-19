@@ -92,6 +92,7 @@ let browser = null;
 try {
   browser = await chromium.launch({
     headless: true,
+    executablePath: process.env.CHROMIUM_PATH || undefined,
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });
 
@@ -110,6 +111,12 @@ try {
     const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     const status = resp?.status() ?? 0;
     await page.waitForTimeout(1000);
+    if (process.env.BROWSER_SMOKE_READY_SELECTOR) {
+      await page.locator(process.env.BROWSER_SMOKE_READY_SELECTOR).waitFor({
+        state: "visible",
+        timeout: timeoutMs,
+      });
+    }
 
     const title = await page.title();
     const hasCanvas = (await page.locator("canvas").count()) > 0;

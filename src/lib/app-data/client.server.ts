@@ -278,7 +278,9 @@ function tokenIdentityKey(token: string): string {
             .digest("base64url");
         }
       }
-    } catch {}
+    } catch {
+      // A non-JWT connector token still has a stable opaque-token cache key.
+    }
   }
   return createHash("sha256").update(token).digest("base64url");
 }

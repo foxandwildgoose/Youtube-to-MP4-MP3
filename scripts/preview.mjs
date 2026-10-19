@@ -158,12 +158,24 @@ export function stopOutcome({ signalled, stubborn, after }) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function isAlive(pid) {
+export function isAlive(pid) {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (err) {
-    return err?.code === "EPERM";
+    if (err?.code !== "EPERM") return false;
+  }
+  try {
+    // kill(pid, 0) also succeeds for an unreaped child. Zombies and dead tasks
+    // cannot serve the preview or respond to signals; the final socket scan
+    // still independently verifies that no listener holds the port.
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const end = stat.lastIndexOf(") ");
+    const state = end === -1 ? null : stat.slice(end + 2).split(/\s+/)[0];
+    return state !== "Z" && state !== "X";
+  } catch (err) {
+    if (err?.code === "ENOENT" || err?.code === "ESRCH") return false;
+    // An unreadable /proc record does not prove a live process has exited.
+    return true;
   }
 }
 
